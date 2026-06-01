@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}Share links - DocShare{% endblock %}
+{% block content %}
+<h1 class="text-lg font-semibold text-slate-900 mb-4">Your share links</h1>
+
+<div class="bg-white border border-slate-200 rounded-lg overflow-hidden">
+    {% if not links %}
+        <div class="p-10 text-center text-slate-400 text-sm">
+            No share links yet. Use the "Share" button next to any file or folder.
+        </div>
+    {% else %}
+        <ul class="divide-y divide-slate-100">
+            {% for link in links %}
+                <li class="px-4 py-3">
+                    <div class="flex items-center justify-between gap-4">
+                        <div class="min-w-0">
+                            <p class="text-sm text-slate-800 truncate">
+                                {% if link.folder %}📁 {{ link.folder.name }}{% else %}📄 {{ link.document.name }}{% endif %}
+                            </p>
+                            <a href="{% url 'share_view' link.token %}"
+                               class="text-xs text-indigo-600 hover:underline break-all">
+                                {{ request.scheme }}://{{ request.get_host }}{% url 'share_view' link.token %}
+                            </a>
+                        </div>
+                        <div class="flex items-center gap-3 text-xs shrink-0">
+                            {% if link.requires_password %}
+                                <span class="text-slate-400">Protected</span>
+                            {% endif %}
+                            {% if link.is_expired %}
+                                <span class="text-red-500">Expired</span>
+                            {% elif link.expires_at %}
+                                <span class="text-slate-400">Expires {{ link.expires_at|date:"M j, Y" }}</span>
+                            {% else %}
+                                <span class="text-emerald-600">Active</span>
+                            {% endif %}
+                            <form method="post" action="{% url 'revoke_link' link.token %}"
+                                  onsubmit="return confirm('Revoke this link?');">
+                                {% csrf_token %}
+                                <button class="text-red-500 hover:underline">Revoke</button>
+                            </form>
+                        </div>
+                    </div>
+                </li>
+            {% endfor %}
+        </ul>
+    {% endif %}
+</div>
+{% endblock %}

@@ -1,0 +1,150 @@
+{% extends "base.html" %}
+{% block title %}About DocShare{% endblock %}
+{% block content %}
+
+<section class="text-center py-16 sm:py-24">
+  <p class="text-sm font-semibold uppercase tracking-[0.2em] text-blue-600">DocShare</p>
+  <h1 class="mt-4 text-4xl sm:text-6xl font-bold tracking-tight text-slate-900 leading-[1.05]">
+    Sharing files,<br class="hidden sm:block"> made effortless.
+  </h1>
+  <p class="mt-6 max-w-2xl mx-auto text-lg sm:text-xl text-slate-600 leading-relaxed">
+    Organize your work into private folders, then hand out a link anyone can open.
+    No friction, no accounts for the people on the other end. Just files, where they
+    need to be.
+  </p>
+  <div class="mt-10 flex items-center justify-center gap-4">
+    <a href="{% url 'browse' %}"
+       class="inline-flex items-center justify-center rounded-full bg-blue-600 px-7 py-3 text-base font-semibold text-white shadow-sm hover:bg-blue-700 transition-colors">
+      Open my files
+    </a>
+    <a href="{% url 'contact' %}"
+       class="inline-flex items-center justify-center rounded-full px-7 py-3 text-base font-semibold text-slate-700 hover:text-blue-600 transition-colors">
+      Get in touch
+    </a>
+  </div>
+</section>
+
+<section class="border-t border-slate-200 py-16 sm:py-20">
+  <div class="max-w-3xl">
+    <h2 class="text-2xl sm:text-3xl font-bold tracking-tight text-slate-900">
+      Built around how you actually work.
+    </h2>
+    <p class="mt-4 text-lg text-slate-600 leading-relaxed">
+      Sign up once and everything you upload stays private to you. Group files into
+      nested folders, keep projects tidy, and share exactly what you choose, exactly
+      when you choose to.
+    </p>
+  </div>
+
+  <div class="mt-12 grid gap-6 sm:grid-cols-2">
+
+    <div class="bg-white border border-slate-200 rounded-lg p-7">
+      <div class="flex h-11 w-11 items-center justify-center rounded-lg bg-blue-50 text-2xl">
+        &#128193;
+      </div>
+      <h3 class="mt-5 text-lg font-semibold text-slate-900">Private nested folders</h3>
+      <p class="mt-2 text-slate-600 leading-relaxed">
+        Create an account and structure your documents into folders within folders.
+        Everything stays private to you until you decide to share it.
+      </p>
+    </div>
+
+    <div class="bg-white border border-slate-200 rounded-lg p-7">
+      <div class="flex h-11 w-11 items-center justify-center rounded-lg bg-blue-50 text-2xl">
+        &#128279;
+      </div>
+      <h3 class="mt-5 text-lg font-semibold text-slate-900">Public share links</h3>
+      <p class="mt-2 text-slate-600 leading-relaxed">
+        Turn any file or folder into a link. Anyone with the link can open or download
+        it instantly. No sign-up, no app, no waiting on the receiving end.
+      </p>
+    </div>
+
+    <div class="bg-white border border-slate-200 rounded-lg p-7">
+      <div class="flex h-11 w-11 items-center justify-center rounded-lg bg-blue-50 text-2xl">
+        &#128274;
+      </div>
+      <h3 class="mt-5 text-lg font-semibold text-slate-900">Passwords and expiry</h3>
+      <p class="mt-2 text-slate-600 leading-relaxed">
+        Add an optional password and an expiry date to any link. Share with
+        confidence, and let access close itself when the moment has passed.
+      </p>
+    </div>
+
+    <div class="bg-white border border-slate-200 rounded-lg p-7">
+      <div class="flex h-11 w-11 items-center justify-center rounded-lg bg-blue-50 text-2xl">
+        &#128196;
+      </div>
+      <h3 class="mt-5 text-lg font-semibold text-slate-900">Send a single file fast</h3>
+      <p class="mt-2 text-slate-600 leading-relaxed">
+        Need to pass along just one document? Share it on its own. The recipient
+        never needs an account to grab it.
+      </p>
+    </div>
+
+  </div>
+</section>
+
+<section class="border-t border-slate-200 py-16 sm:py-20">
+  <div class="grid gap-10 lg:grid-cols-2 lg:items-center">
+    <div>
+      <h2 class="text-2xl sm:text-3xl font-bold tracking-tight text-slate-900">
+        Preview before you download.
+      </h2>
+      <p class="mt-4 text-lg text-slate-600 leading-relaxed">
+        Images, PDFs, and text files render inline, right in the browser. Recipients
+        see exactly what they are getting before they save a thing, so nothing gets
+        downloaded blind.
+      </p>
+      <ul class="mt-6 space-y-3 text-slate-700">
+        <li class="flex items-start gap-3">
+          <span class="mt-1 text-blue-600 font-bold">&#10003;</span>
+          Images open as full inline previews
+        </li>
+        <li class="flex items-start gap-3">
+          <span class="mt-1 text-blue-600 font-bold">&#10003;</span>
+          PDFs display page by page in place
+        </li>
+        <li class="flex items-start gap-3">
+          <span class="mt-1 text-blue-600 font-bold">&#10003;</span>
+          Text files read cleanly without a download
+        </li>
+      </ul>
+    </div>
+
+    <div class="bg-white border border-slate-200 rounded-lg p-8">
+      <div class="space-y-3">
+        <div class="flex items-center gap-3 rounded-md bg-slate-50 px-4 py-3">
+          <span class="text-xl">&#128247;</span>
+          <span class="font-medium text-slate-700">cover-art.png</span>
+          <span class="ml-auto text-xs font-semibold text-blue-600">Preview</span>
+        </div>
+        <div class="flex items-center gap-3 rounded-md bg-slate-50 px-4 py-3">
+          <span class="text-xl">&#128209;</span>
+          <span class="font-medium text-slate-700">proposal.pdf</span>
+          <span class="ml-auto text-xs font-semibold text-blue-600">Preview</span>
+        </div>
+        <div class="flex items-center gap-3 rounded-md bg-slate-50 px-4 py-3">
+          <span class="text-xl">&#128221;</span>
+          <span class="font-medium text-slate-700">notes.txt</span>
+          <span class="ml-auto text-xs font-semibold text-blue-600">Preview</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="border-t border-slate-200 py-16 sm:py-24 text-center">
+  <h2 class="text-3xl sm:text-4xl font-bold tracking-tight text-slate-900">
+    Ready to share something?
+  </h2>
+  <p class="mt-4 max-w-xl mx-auto text-lg text-slate-600">
+    Your files, organized and ready to send in seconds.
+  </p>
+  <a href="{% url 'browse' %}"
+     class="mt-8 inline-flex items-center justify-center rounded-full bg-blue-600 px-8 py-3.5 text-base font-semibold text-white shadow-sm hover:bg-blue-700 transition-colors">
+    Get started
+  </a>
+</section>
+
+{% endblock %}

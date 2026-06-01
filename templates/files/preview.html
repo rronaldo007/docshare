@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}{{ doc.name }} - DocShare{% endblock %}
+{% block content %}
+<div class="flex items-center justify-between mb-4">
+    <h1 class="text-lg font-semibold text-slate-900 truncate">{{ doc.name }}</h1>
+    <a href="{% url 'download_document' doc.id %}"
+       class="bg-indigo-600 text-white px-4 py-2 rounded-md text-sm hover:bg-indigo-700 shrink-0">
+        Download
+    </a>
+</div>
+
+<div class="bg-white border border-slate-200 rounded-lg p-4">
+    {% if doc.kind == 'image' %}
+        <img src="{% url 'inline_document' doc.id %}" alt="{{ doc.name }}" class="max-w-full mx-auto rounded">
+    {% elif doc.kind == 'pdf' %}
+        <iframe src="{% url 'inline_document' doc.id %}" class="w-full h-[80vh] rounded border border-slate-200"></iframe>
+    {% elif doc.kind == 'text' %}
+        <iframe src="{% url 'inline_document' doc.id %}" class="w-full h-[70vh] rounded border border-slate-200 bg-slate-50"></iframe>
+    {% else %}
+        <div class="text-center py-12 text-slate-500 text-sm">
+            No inline preview available for this file type.<br>
+            <a href="{% url 'download_document' doc.id %}" class="text-indigo-600 hover:underline">Download it instead</a>.
+        </div>
+    {% endif %}
+</div>
+
+<div class="mt-4">
+    <a href="{% if doc.folder %}{{ doc.folder.get_absolute_url }}{% else %}{% url 'browse' %}{% endif %}"
+       class="text-sm text-slate-500 hover:text-slate-900">&larr; Back</a>
+</div>
+{% endblock %}

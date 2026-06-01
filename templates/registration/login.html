@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}Sign in - DocShare{% endblock %}
+{% block content %}
+<div class="w-full max-w-md text-center">
+    <span class="font-display text-4xl font-black tracking-tight text-slate-900">DocShare</span>
+
+    <h1 class="mt-10 text-lg font-bold text-slate-900">Sign in</h1>
+    <p class="mt-1 text-sm text-slate-500">to continue to your DocShare account.</p>
+
+    {% if form.errors %}
+        <div class="mt-6 px-4 py-3 rounded-xl bg-red-50 text-red-700 text-sm border border-red-100">
+            Invalid username or password.
+        </div>
+    {% endif %}
+
+    <form method="post" class="mt-8 space-y-3 text-left">
+        {% csrf_token %}
+        <input type="text" name="username" placeholder="Username" required autofocus
+               class="w-full rounded-xl border border-slate-300 px-4 py-3.5 text-sm focus:outline-none focus:border-we-blue focus:ring-2 focus:ring-we-blue/30">
+        <div class="relative">
+            <input type="password" name="password" placeholder="Password" required
+                   class="w-full rounded-xl border border-slate-300 px-4 py-3.5 pr-11 text-sm focus:outline-none focus:border-we-blue focus:ring-2 focus:ring-we-blue/30">
+            {% include "partials/_pw_toggle.html" %}
+        </div>
+        <button type="submit"
+                class="w-full rounded-full bg-we-blue text-white py-3.5 text-sm font-semibold hover:bg-we-blue-dark transition-colors">
+            Continue
+        </button>
+    </form>
+
+    <p class="mt-8 text-sm text-slate-500">
+        Don't have an account?
+        <a href="{% url 'signup' %}" class="font-semibold text-slate-900 underline">Sign up</a>.
+    </p>
+</div>
+{% endblock %}

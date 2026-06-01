@@ -1,0 +1,112 @@
+{% extends "base.html" %}
+{% block title %}DocShare - Send files. Move ideas.{% endblock %}
+{% block body_class %}bg-gradient-to-b from-[#0b0d24] via-[#0a0a1c] to-black text-white{% endblock %}
+
+{% block full %}
+<section class="relative overflow-hidden">
+
+    <!-- Floating decorative file cards (wide screens only, purely ornamental) -->
+    <div aria-hidden="true" class="pointer-events-none absolute inset-0 hidden xl:block">
+        <!-- photo .jpg card, top-left -->
+        <div class="absolute top-16 left-[3%] w-44 -rotate-[5deg]">
+            <div class="relative rounded-2xl overflow-hidden shadow-2xl shadow-black/50 ring-1 ring-white/10">
+                <div class="h-32 bg-gradient-to-br from-amber-200 via-orange-300 to-indigo-500"></div>
+                <span class="absolute bottom-2 left-2 px-2.5 py-1 rounded-full bg-black/70 text-white text-[11px] font-semibold">.jpg</span>
+            </div>
+        </div>
+
+        <!-- .psd card, top-right -->
+        <div class="absolute top-24 right-[6%] w-28 h-28 rounded-2xl bg-[#e0e4ff] shadow-2xl shadow-black/40 rotate-6 flex items-center justify-center">
+            <span class="font-display text-2xl font-bold text-[#4f5bd5]">.psd</span>
+        </div>
+
+        <!-- .tif card, upper-right -->
+        <div class="absolute top-52 right-[16%] w-24 h-24 rounded-2xl bg-[#ffd9cb] shadow-xl shadow-black/30 -rotate-6 flex items-center justify-center">
+            <span class="font-display text-xl font-bold text-[#ef5b3d]">.tif</span>
+        </div>
+
+        <!-- playful illustration block, far right -->
+        <div class="absolute top-1/2 -translate-y-1/2 right-[1%] w-40 h-48 rounded-2xl bg-white shadow-2xl shadow-black/50 rotate-3 overflow-hidden">
+            <div class="absolute -bottom-6 -right-4 w-28 h-28 rounded-xl bg-gradient-to-br from-orange-500 to-rose-600 rotate-12"></div>
+            <div class="absolute top-6 left-6 w-10 h-10 rounded-full bg-we-blue"></div>
+            <div class="absolute top-3 right-3 w-8 h-8 rounded-full bg-slate-900 flex items-center justify-center text-white text-xs">★</div>
+        </div>
+
+        <!-- .mov card, bottom-right -->
+        <div class="absolute bottom-24 right-[10%] w-40 rotate-3">
+            <div class="relative rounded-2xl overflow-hidden shadow-2xl shadow-black/50 ring-1 ring-white/10">
+                <div class="h-28 bg-gradient-to-br from-orange-300 via-rose-400 to-indigo-500"></div>
+                <span class="absolute bottom-2 left-2 px-2.5 py-1 rounded-full bg-[#e0e4ff] text-[#4f5bd5] text-[11px] font-semibold">.mov</span>
+            </div>
+        </div>
+
+        <!-- folder, bottom-left -->
+        <div class="absolute bottom-20 left-[5%] -rotate-3 text-center">
+            <div class="relative w-32 h-24 mx-auto">
+                <div class="absolute top-0 left-0 w-16 h-4 rounded-t-lg bg-we-blue"></div>
+                <div class="absolute top-3 inset-x-0 bottom-0 rounded-xl rounded-tl-none bg-we-blue shadow-2xl shadow-black/40"></div>
+            </div>
+            <span class="mt-2 inline-block px-2.5 py-1 rounded-full bg-white text-slate-700 text-[11px] font-semibold shadow">DocShare_v01</span>
+        </div>
+    </div>
+
+    <!-- Hero content -->
+    <div class="relative z-10 max-w-4xl mx-auto px-6 min-h-[calc(100vh-4rem)] grid lg:grid-cols-2 gap-10 lg:gap-12 items-center py-12 sm:py-16">
+
+        <!-- Upload panel -->
+        <div class="w-full max-w-sm mx-auto lg:mx-0 order-2 lg:order-1">
+            <div class="bg-white text-slate-900 rounded-2xl shadow-2xl shadow-black/40 p-5">
+                <p class="text-center text-sm font-semibold text-slate-700 mb-4">Send a file</p>
+                <form method="post" enctype="multipart/form-data" action="{% url 'anonymous_upload' %}">
+                    {% csrf_token %}
+                    <label for="file-input"
+                           class="block rounded-xl bg-slate-50 border border-slate-200 hover:border-we-blue hover:bg-blue-50/40 transition-colors px-4 py-7 text-center cursor-pointer">
+                        <span class="mx-auto mb-2 inline-flex w-10 h-10 rounded-full bg-we-blue text-white items-center justify-center text-2xl font-light leading-none">+</span>
+                        <span class="block text-sm font-semibold text-slate-800">Add files</span>
+                        <span class="block text-xs text-slate-400 mt-0.5">Images, PDFs, text and more</span>
+                        <input id="file-input" type="file" name="file" required class="sr-only">
+                    </label>
+                    <p id="file-name" class="text-xs text-we-blue font-medium mt-2 text-center truncate"></p>
+                    <button type="submit"
+                            class="mt-4 w-full bg-we-blue text-white py-3 rounded-full text-sm font-semibold hover:bg-we-blue-dark transition-colors">
+                        Transfer
+                    </button>
+                </form>
+                <p class="mt-3 text-center text-xs text-slate-400">
+                    No account needed.
+                    <a href="{% url 'signup' %}" class="text-we-blue font-medium hover:underline">Sign up</a>
+                    for folders &amp; expiry.
+                </p>
+            </div>
+        </div>
+
+        <!-- Headline -->
+        <div class="text-center lg:text-left order-1 lg:order-2">
+            <h1 class="font-display font-black leading-[0.92] tracking-tight text-5xl sm:text-6xl lg:text-7xl xl:text-8xl">
+                Send files.<br>Move ideas.
+            </h1>
+            <p class="mt-5 sm:mt-6 text-base text-white/60 max-w-sm mx-auto lg:mx-0">
+                Drop a file, get a link, share it anywhere. Images, PDFs and text
+                preview right in the browser.
+            </p>
+            {% if user.is_authenticated %}
+                <a href="{% url 'browse' %}"
+                   class="mt-8 inline-block bg-white text-slate-900 px-6 py-3 rounded-full text-sm font-semibold hover:bg-white/90 transition-colors">
+                    Go to my files
+                </a>
+            {% endif %}
+        </div>
+    </div>
+</section>
+
+<script>
+    (function () {
+        var input = document.getElementById("file-input");
+        if (!input) return;
+        input.addEventListener("change", function () {
+            var label = document.getElementById("file-name");
+            label.textContent = input.files.length ? input.files[0].name : "";
+        });
+    })();
+</script>
+{% endblock %}

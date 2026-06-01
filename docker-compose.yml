@@ -1,0 +1,25 @@
+services:
+  web:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      # Change these before exposing the app to anything real.
+      DJANGO_SECRET_KEY: "change-me-to-a-long-random-value"
+      DJANGO_DEBUG: "False"
+      DJANGO_ALLOWED_HOSTS: "localhost,127.0.0.1"
+      DJANGO_DB_PATH: "/app/data/db.sqlite3"
+      DJANGO_MEDIA_ROOT: "/app/media"
+      # This image serves plain HTTP on localhost, so the HTTPS-only hardening
+      # (forced https redirect, secure cookies, HSTS) is turned OFF here -- with
+      # it on, the site would 301 to a non-existent https endpoint. When you
+      # deploy behind real TLS, REMOVE this line (it defaults to on) so secure
+      # cookies + HSTS + the https redirect are enabled.
+      DJANGO_HTTPS: "False"
+    volumes:
+      - dbdata:/app/data
+      - media:/app/media
+
+volumes:
+  dbdata:
+  media:

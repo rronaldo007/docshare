@@ -1,4 +1,6 @@
 import mimetypes
+import tempfile
+import zipfile
 from datetime import timedelta
 
 from django.conf import settings
@@ -552,6 +554,9 @@ def share_view(request, token):
     folder = link.folder
     subfolders = folder.children.all()
     documents = folder.documents.all()
+    # Count every downloadable file (this folder + nested) so we can show a
+    # summary and only offer "Download all" when there's something to zip.
+    total_files = len(_descendant_documents(folder))
     return render(
         request,
         "files/share_folder.html",
@@ -560,6 +565,8 @@ def share_view(request, token):
             "folder": folder,
             "subfolders": subfolders,
             "documents": documents,
+            "subfolder_count": subfolders.count(),
+            "total_files": total_files,
         },
     )
 
@@ -604,3 +611,51 @@ def _is_descendant(doc, root_folder):
             return True
         node = node.parent
     return False
+
+
+def _descendant_documents(root):
+    """Every document under root (any depth), each with an archive name that is
+    its path relative to root -- so a zip mirrors the shared folder's tree.
+
+    Only walks the shared folder's own subtree, so it can never include a file
+    outside the link's target (same guarantee as _is_descendant)."""
+    results = []
+
+    def walk(folder, prefix):
+        for doc in folder.documents.all():
+            results.append((doc, prefix + doc.name))
+        for child in folder.children.all():
+            walk(child, prefix + child.name + "/")
+
+    walk(root, "")
+    return results
+
+
+def share_download_all(request, token):
+    """Stream every file in a shared folder (and its subfolders) as one zip."""
+    link = _valid_link(token)
+    if not _is_unlocked(request, link):
+        return redirect("share_view", token=token)
+    if not link.folder_id:
+        raise Http404
+
+    docs = _descendant_documents(link.folder)
+    if not docs:
+        raise Http404("This folder has no files to download.")
+
+    # Spill to disk past a small threshold so a large folder doesn't blow up
+    # memory on a small instance; stored (no compression) keeps CPU low since
+    # most uploads (images, PDFs) are already compressed.
+    tmp = tempfile.SpooledTemporaryFile(max_size=16 * 1024 * 1024)
+    with zipfile.ZipFile(tmp, "w", zipfile.ZIP_STORED) as zf:
+        for doc, arcname in docs:
+            try:
+                zf.write(doc.file.path, arcname)
+            except (FileNotFoundError, ValueError):
+                continue  # skip a missing/unreadable file rather than 500
+    tmp.seek(0)
+
+    filename = f"{link.folder.name or 'folder'}.zip"
+    return FileResponse(
+        tmp, as_attachment=True, filename=filename, content_type="application/zip"
+    )

@@ -13,6 +13,11 @@ urlpatterns = [
     path("share-anon/", files_views.anonymous_upload, name="anonymous_upload"),
     path("s/<uuid:token>/", files_views.share_view, name="share_view"),
     path(
+        "s/<uuid:token>/download-all/",
+        files_views.share_download_all,
+        name="share_download_all",
+    ),
+    path(
         "s/<uuid:token>/doc/<int:doc_id>/",
         files_views.share_download,
         name="share_download",

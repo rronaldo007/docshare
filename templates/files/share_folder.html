@@ -4,10 +4,23 @@
 <div class="py-8">
     <div class="flex items-center gap-4 mb-6">
         <span class="flex h-12 w-12 items-center justify-center rounded-xl bg-blue-50 text-blue-600 text-2xl shrink-0">&#128193;</span>
-        <div class="min-w-0">
+        <div class="min-w-0 flex-1">
             <p class="text-xs font-semibold uppercase tracking-[0.2em] text-blue-600 mb-1">Shared folder</p>
             <h1 class="text-2xl sm:text-3xl font-extrabold tracking-tight text-slate-900 truncate">{{ folder.name }}</h1>
+            <p class="mt-1 text-sm text-slate-500">
+                {{ subfolder_count }} subfolder{{ subfolder_count|pluralize }}
+                &middot; {{ total_files }} file{{ total_files|pluralize }}
+            </p>
         </div>
+        {% if total_files %}
+            <a href="{% url 'share_download_all' link.token %}"
+               class="shrink-0 inline-flex items-center gap-2 rounded-full bg-blue-600 text-white px-5 py-2.5 text-sm font-semibold hover:bg-blue-700 transition-colors">
+                <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-6L12 15m0 0l4.5-4.5M12 15V3"/>
+                </svg>
+                Download all
+            </a>
+        {% endif %}
     </div>
 
     <div class="bg-white border border-slate-200 rounded-2xl shadow-xl shadow-slate-200/50 overflow-hidden">

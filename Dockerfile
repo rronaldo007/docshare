@@ -22,6 +22,7 @@ USER appuser
 EXPOSE 8000
 
 ENTRYPOINT ["sh", "docker-entrypoint.sh"]
-# Shell form so ${PORT} (injected by the host, e.g. Sevalla) expands at runtime;
-# falls back to 8000 for local docker. The entrypoint runs this via exec "$@".
-CMD gunicorn config.wsgi:application --bind "0.0.0.0:${PORT:-8000}" --workers 3
+# Shell form so ${PORT}/${WEB_CONCURRENCY} (injected by the host, e.g. Sevalla)
+# expand at runtime; PORT falls back to 8000 for local docker and worker count
+# to 2 (keeps memory modest on small instances). Run by the entrypoint via "$@".
+CMD gunicorn config.wsgi:application --bind "0.0.0.0:${PORT:-8000}" --workers "${WEB_CONCURRENCY:-2}"

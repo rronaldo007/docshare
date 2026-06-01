@@ -6,7 +6,7 @@ from django.contrib import messages
 from django.contrib.auth import get_user_model
 from django.contrib.auth.decorators import login_required
 from django.core.cache import cache
-from django.http import FileResponse, Http404
+from django.http import FileResponse, Http404, HttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
 
@@ -252,6 +252,12 @@ def upload_folder(request, folder_id=None):
         doc.content_type = _safe_content_type(upload, filename=filename)
         doc.save()
         created += 1
+
+    # The browser uploader sends files in batches via XHR; reply with a tiny
+    # 204 so it can move to the next batch without downloading a full HTML page
+    # (and without a per-batch flash message). Non-JS posts get the normal flow.
+    if request.headers.get("x-requested-with") == "XMLHttpRequest":
+        return HttpResponse(status=204)
 
     messages.success(
         request, f"Uploaded {created} file{'' if created == 1 else 's'}."

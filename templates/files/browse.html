@@ -30,7 +30,7 @@
         </button>
     </form>
 
-    <form method="post"
+    <form id="single-upload-form" method="post"
           action="{% if current %}{% url 'upload' current.id %}{% else %}{% url 'upload_root' %}{% endif %}"
           enctype="multipart/form-data" class="flex items-center gap-2 w-full sm:w-auto">
         {% csrf_token %}
@@ -63,7 +63,10 @@
         <p id="drop-overlay-text" class="text-slate-900 font-semibold">
             Drop to upload{% if current %} to &ldquo;{{ current.name }}&rdquo;{% else %} to your files{% endif %}
         </p>
-        <p class="text-xs text-slate-500 mt-1">Files and folders both work</p>
+        <p id="drop-overlay-sub" class="text-xs text-slate-500 mt-1">Files and folders both work</p>
+        <div id="drop-progress" class="hidden mt-4 mx-auto h-2 w-60 max-w-full rounded-full bg-slate-200 overflow-hidden">
+            <div id="drop-progress-bar" class="h-full w-0 bg-we-blue transition-[width] duration-150 ease-out"></div>
+        </div>
     </div>
 </div>
 
@@ -148,43 +151,126 @@
 </div>
 
 <script>
-    // Uploads go through the folder-upload endpoint: each file is sent with its
-    // path-within-the-drop so the server rebuilds any nested folder structure.
-    // Used by the "Upload folder" button AND by page-wide drag-and-drop.
+    // All JS uploads (drag-and-drop, "Upload folder", and the single-file form)
+    // go through one XHR uploader so big files show a live progress percentage.
+    // Files are POSTed to the folder-upload endpoint with their path-within-the
+    // -drop, so nested folders are rebuilt server-side.
     (function () {
         var form = document.getElementById("folder-upload-form");
         if (!form) return;
         var input = document.getElementById("folder-input");
         var btn = document.getElementById("folder-pick-btn");
+        var singleForm = document.getElementById("single-upload-form");
         var overlay = document.getElementById("drop-overlay");
         var overlayText = document.getElementById("drop-overlay-text");
+        var sub = document.getElementById("drop-overlay-sub");
+        var progress = document.getElementById("drop-progress");
+        var bar = document.getElementById("drop-progress-bar");
         var uploadUrl = form.action;
         var csrf = form.querySelector("[name=csrfmiddlewaretoken]").value;
+        var defaultText = overlayText ? overlayText.textContent.trim() : "Drop to upload";
+        var defaultSub = sub ? sub.textContent : "";
         var dragDepth = 0;
         var uploading = false;
+
+        function humanSize(n) {
+            var u = ["B", "KB", "MB", "GB"], i = 0;
+            while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+            return (i === 0 ? n : n.toFixed(1)) + " " + u[i];
+        }
+        function showOverlay() { if (overlay) overlay.classList.remove("hidden"); }
+        function hideOverlay() {
+            if (overlay) overlay.classList.add("hidden");
+            if (progress) progress.classList.add("hidden");
+            if (bar) bar.style.width = "0%";
+            if (overlayText) overlayText.textContent = defaultText;
+            if (sub) sub.textContent = defaultSub;
+        }
+        function failUpload() {
+            uploading = false;
+            hideOverlay();
+            alert("Upload failed. Please try again.");
+        }
+
+        // Upload in batches bounded by file COUNT and cumulative SIZE, so each
+        // request stays well under the proxy's body limit (~100 MB) and the
+        // instance's memory. This is what makes very large folders (hundreds of
+        // files) upload reliably. Batches run sequentially; progress is overall.
+        var MAX_BATCH_FILES = 40;
+        var MAX_BATCH_BYTES = 40 * 1024 * 1024; // 40 MB
 
         function uploadPairs(pairs) {
             pairs = pairs.filter(function (p) { return p && p.file; });
             if (!pairs.length || uploading) return;
             uploading = true;
-            var data = new FormData();
-            data.append("csrfmiddlewaretoken", csrf);
+
+            var batches = [], cur = [], curBytes = 0;
             pairs.forEach(function (p) {
-                data.append("files", p.file);
-                data.append("paths", p.path || p.file.name);
+                var sz = p.file.size || 0;
+                if (cur.length && (cur.length >= MAX_BATCH_FILES || curBytes + sz > MAX_BATCH_BYTES)) {
+                    batches.push(cur); cur = []; curBytes = 0;
+                }
+                cur.push(p);
+                curBytes += sz;
             });
-            if (overlay && overlayText) {
-                overlayText.textContent =
-                    "Uploading " + pairs.length + " item" + (pairs.length === 1 ? "" : "s") + "…";
-                overlay.classList.remove("hidden");
+            if (cur.length) batches.push(cur);
+
+            var totalBytes = pairs.reduce(function (a, p) { return a + (p.file.size || 0); }, 0) || 1;
+            var totalFiles = pairs.length;
+            var sentBytes = 0;
+            var i = 0;
+
+            showOverlay();
+            if (sub) sub.textContent = "";
+            if (progress) progress.classList.remove("hidden");
+            if (bar) bar.style.width = "0%";
+
+            function fileWord() { return totalFiles === 1 ? "file" : "files"; }
+            function finish() {
+                if (bar) bar.style.width = "100%";
+                if (overlayText) overlayText.textContent = "Finishing up…";
+                window.location.reload();
             }
-            fetch(uploadUrl, { method: "POST", body: data })
-                .then(function (r) { window.location = r.redirected ? r.url : uploadUrl; })
-                .catch(function () {
-                    uploading = false;
-                    if (overlay) overlay.classList.add("hidden");
-                    alert("Upload failed. Please try again.");
+            function sendNext() {
+                if (i >= batches.length) { finish(); return; }
+                var batch = batches[i];
+                var batchBytes = 0;
+                var data = new FormData();
+                data.append("csrfmiddlewaretoken", csrf);
+                batch.forEach(function (p) {
+                    data.append("files", p.file);
+                    data.append("paths", p.path || p.file.name);
+                    batchBytes += p.file.size || 0;
                 });
+
+                var xhr = new XMLHttpRequest();
+                xhr.open("POST", uploadUrl, true);
+                xhr.setRequestHeader("X-Requested-With", "XMLHttpRequest");
+                xhr.upload.addEventListener("progress", function (e) {
+                    if (!e.lengthComputable) return;
+                    var loaded = sentBytes + e.loaded;
+                    var pct = Math.min(99, Math.round((loaded / totalBytes) * 100));
+                    if (bar) bar.style.width = pct + "%";
+                    if (overlayText) {
+                        overlayText.textContent =
+                            "Uploading " + totalFiles + " " + fileWord() + "… " + pct + "%";
+                    }
+                    if (sub) sub.textContent = humanSize(loaded) + " of " + humanSize(totalBytes);
+                });
+                xhr.addEventListener("load", function () {
+                    if (xhr.status >= 200 && xhr.status < 400) {
+                        sentBytes += batchBytes;
+                        i++;
+                        sendNext();
+                    } else {
+                        failUpload();
+                    }
+                });
+                xhr.addEventListener("error", failUpload);
+                xhr.addEventListener("abort", failUpload);
+                xhr.send(data);
+            }
+            sendNext();
         }
 
         // "Upload folder" button -> native directory picker.
@@ -197,6 +283,17 @@
                     pairs.push({ file: f, path: f.webkitRelativePath || f.name });
                 }
                 uploadPairs(pairs);
+            });
+        }
+
+        // Single-file "Upload" form -> same uploader, so big files show progress.
+        if (singleForm) {
+            var singleInput = singleForm.querySelector("input[type=file]");
+            singleForm.addEventListener("submit", function (e) {
+                if (!singleInput || !singleInput.files.length) return; // let native validation run
+                e.preventDefault();
+                var f = singleInput.files[0];
+                uploadPairs([{ file: f, path: f.name }]);
             });
         }
 
@@ -244,7 +341,7 @@
             if (!hasFiles(e) || uploading) return;
             e.preventDefault();
             dragDepth++;
-            if (overlay) overlay.classList.remove("hidden");
+            showOverlay();
         });
         window.addEventListener("dragover", function (e) {
             if (!hasFiles(e) || uploading) return;
@@ -256,7 +353,7 @@
             dragDepth--;
             if (dragDepth <= 0) {
                 dragDepth = 0;
-                if (overlay && !uploading) overlay.classList.add("hidden");
+                if (!uploading) hideOverlay();
             }
         });
         window.addEventListener("drop", function (e) {
@@ -270,7 +367,7 @@
                     var en = items[i].webkitGetAsEntry && items[i].webkitGetAsEntry();
                     if (en) entries.push(en);
                 }
-                if (!entries.length) { if (overlay) overlay.classList.add("hidden"); return; }
+                if (!entries.length) { hideOverlay(); return; }
                 Promise.all(entries.map(function (en) { return traverse(en, ""); }))
                     .then(function (arrs) { uploadPairs([].concat.apply([], arrs)); });
             } else {

@@ -150,8 +150,11 @@ if not DEBUG and _env_bool("DJANGO_HTTPS", True):
 # Uploads are stored byte-for-byte, so files keep their original quality at any
 # resolution -- nothing is ever recompressed or downscaled. Files larger than
 # this threshold stream to a temp file on disk instead of being buffered in
-# memory; there is no cap on an individual file's size.
-FILE_UPLOAD_MAX_MEMORY_SIZE = 10 * 1024 * 1024  # 10 MB
+# memory; there is no cap on an individual file's size. Kept small (Django's
+# default) so a multi-file upload doesn't hold many files in RAM at once -- the
+# browser also batches large uploads, but this keeps per-request memory low on
+# small instances.
+FILE_UPLOAD_MAX_MEMORY_SIZE = 2 * 1024 * 1024  # 2 MB
 
 # This limit applies ONLY to non-file form data (e.g. the folder-upload "paths"
 # list), never to the uploaded files, so large/high-quality files are unaffected.

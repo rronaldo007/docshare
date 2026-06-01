@@ -22,4 +22,6 @@ USER appuser
 EXPOSE 8000
 
 ENTRYPOINT ["sh", "docker-entrypoint.sh"]
-CMD ["gunicorn", "config.wsgi:application", "--bind", "0.0.0.0:8000", "--workers", "3"]
+# Shell form so ${PORT} (injected by the host, e.g. Sevalla) expands at runtime;
+# falls back to 8000 for local docker. The entrypoint runs this via exec "$@".
+CMD gunicorn config.wsgi:application --bind "0.0.0.0:${PORT:-8000}" --workers 3

@@ -1,5 +1,4 @@
 import mimetypes
-import tempfile
 import zipfile
 from datetime import timedelta
 
@@ -8,7 +7,12 @@ from django.contrib import messages
 from django.contrib.auth import get_user_model
 from django.contrib.auth.decorators import login_required
 from django.core.cache import cache
-from django.http import FileResponse, Http404, HttpResponse
+from django.http import (
+    FileResponse,
+    Http404,
+    HttpResponse,
+    StreamingHttpResponse,
+)
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
 
@@ -631,6 +635,66 @@ def _descendant_documents(root):
     return results
 
 
+class _UnseekableZipSink:
+    """A write-only sink for ZipFile. It provides tell() for offset bookkeeping
+    but no seek(), so ZipFile streams with data descriptors and never rewinds --
+    letting us build the zip on the fly and yield it chunk by chunk."""
+
+    def __init__(self):
+        self._chunks = []
+        self._pos = 0
+
+    def write(self, data):
+        self._chunks.append(bytes(data))
+        self._pos += len(data)
+        return len(data)
+
+    def tell(self):
+        return self._pos
+
+    def flush(self):
+        pass
+
+    def seekable(self):
+        return False
+
+    def drain(self):
+        chunks, self._chunks = self._chunks, []
+        return b"".join(chunks)
+
+
+def _zip_stream(docs):
+    """Yield a zip of `docs` incrementally (constant memory, no temp file), so
+    a large 'Download all' starts sending immediately -- avoiding proxy/worker
+    timeouts and disk pressure that buffering the whole archive would cause."""
+    sink = _UnseekableZipSink()
+    zf = zipfile.ZipFile(sink, "w", zipfile.ZIP_STORED, allowZip64=True)
+    for doc, arcname in docs:
+        try:
+            src = doc.file.open("rb")
+        except (FileNotFoundError, OSError, ValueError):
+            continue  # skip a missing/unreadable file rather than 500
+        try:
+            with zf.open(arcname, "w") as dest:
+                while True:
+                    chunk = src.read(262144)
+                    if not chunk:
+                        break
+                    dest.write(chunk)
+                    data = sink.drain()
+                    if data:
+                        yield data
+        finally:
+            src.close()
+        data = sink.drain()
+        if data:
+            yield data
+    zf.close()
+    data = sink.drain()
+    if data:
+        yield data
+
+
 def share_download_all(request, token):
     """Stream every file in a shared folder (and its subfolders) as one zip."""
     link = _valid_link(token)
@@ -643,19 +707,9 @@ def share_download_all(request, token):
     if not docs:
         raise Http404("This folder has no files to download.")
 
-    # Spill to disk past a small threshold so a large folder doesn't blow up
-    # memory on a small instance; stored (no compression) keeps CPU low since
-    # most uploads (images, PDFs) are already compressed.
-    tmp = tempfile.SpooledTemporaryFile(max_size=16 * 1024 * 1024)
-    with zipfile.ZipFile(tmp, "w", zipfile.ZIP_STORED) as zf:
-        for doc, arcname in docs:
-            try:
-                zf.write(doc.file.path, arcname)
-            except (FileNotFoundError, ValueError):
-                continue  # skip a missing/unreadable file rather than 500
-    tmp.seek(0)
-
-    filename = f"{link.folder.name or 'folder'}.zip"
-    return FileResponse(
-        tmp, as_attachment=True, filename=filename, content_type="application/zip"
+    name = (link.folder.name or "folder").replace('"', "").replace("\\", "")
+    response = StreamingHttpResponse(
+        _zip_stream(docs), content_type="application/zip"
     )
+    response["Content-Disposition"] = f'attachment; filename="{name}.zip"'
+    return response

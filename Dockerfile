@@ -25,4 +25,11 @@ ENTRYPOINT ["sh", "docker-entrypoint.sh"]
 # Shell form so ${PORT}/${WEB_CONCURRENCY} (injected by the host, e.g. Sevalla)
 # expand at runtime; PORT falls back to 8000 for local docker and worker count
 # to 2 (keeps memory modest on small instances). Run by the entrypoint via "$@".
-CMD gunicorn config.wsgi:application --bind "0.0.0.0:${PORT:-8000}" --workers "${WEB_CONCURRENCY:-2}" --timeout "${GUNICORN_TIMEOUT:-120}"
+#
+# Threaded (gthread) workers, not the default sync worker: a sync worker only
+# heartbeats the master between requests, so a long streaming download (a big
+# folder zip, a large file) looks "hung" and is SIGKILLed at --timeout, dropping
+# the download mid-stream. With gthread the main loop keeps heartbeating while a
+# request thread streams, so long downloads complete; threads also let a worker
+# serve others while one streams. gthread ships in gunicorn -- no new dependency.
+CMD gunicorn config.wsgi:application --bind "0.0.0.0:${PORT:-8000}" --worker-class "${GUNICORN_WORKER_CLASS:-gthread}" --workers "${WEB_CONCURRENCY:-2}" --threads "${GUNICORN_THREADS:-4}" --timeout "${GUNICORN_TIMEOUT:-120}"

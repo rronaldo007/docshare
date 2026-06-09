@@ -16,6 +16,10 @@ services:
       # deploy behind real TLS, REMOVE this line (it defaults to on) so secure
       # cookies + HSTS + the https redirect are enabled.
       DJANGO_HTTPS: "False"
+      # Threaded workers so long streaming downloads (large folder zips, big
+      # files) aren't killed at GUNICORN_TIMEOUT mid-stream. See Dockerfile CMD.
+      GUNICORN_WORKER_CLASS: "gthread"
+      GUNICORN_THREADS: "4"
     volumes:
       - dbdata:/app/data
       - media:/app/media

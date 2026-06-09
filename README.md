@@ -80,6 +80,13 @@ Other supported variables:
 - `DJANGO_DATA_UPLOAD_MAX_NUMBER_FILES` / `DJANGO_DATA_UPLOAD_MAX_NUMBER_FIELDS`
   - raise these only if a single folder upload exceeds the defaults
   (20000 files / 50000 fields).
+- `GUNICORN_WORKER_CLASS` / `GUNICORN_THREADS` / `GUNICORN_TIMEOUT` - gunicorn
+  serving knobs (defaults `gthread` / `4` / `120`). A folder "Download all" zip
+  and large single files are streamed and can take a long time to send;
+  **threaded (`gthread`) workers are required** so a long download is not
+  mistaken for a hung worker and SIGKILLed at `GUNICORN_TIMEOUT` mid-stream. Do
+  not switch back to the `sync` worker class for this app unless you also raise
+  `GUNICORN_TIMEOUT` high enough to cover the slowest expected download.
 
 ## How sharing works
 

@@ -1,5 +1,6 @@
 import mimetypes
 import os
+import time
 import uuid
 import zipfile
 from datetime import timedelta
@@ -315,6 +316,58 @@ def _safe_remove(path):
         pass
 
 
+# A Sevalla cron job runs as a separate process and CANNOT mount the persistent
+# disk, so it could never see these staging files. Cleanup therefore runs inside
+# the web process (which owns the disk): a throttled opportunistic sweep on the
+# upload-complete path, plus the cleanup_chunks management command (run at deploy
+# time / manually). Abandoned .part files only ever come from interrupted chunked
+# uploads, so tying the sweep to the upload path covers the real case.
+CHUNK_MAX_AGE_SECONDS = 24 * 3600
+CHUNK_SWEEP_MIN_INTERVAL = 3600  # sweep at most once per hour
+_CHUNK_SWEEP_MARKER = ".last_sweep"
+
+
+def _sweep_stale_chunks(max_age_seconds):
+    """Delete staging .part files last modified more than max_age_seconds ago.
+
+    Returns the number removed. Shared by the cleanup_chunks command and the
+    opportunistic sweep below. Idempotent and failure-tolerant, so it is safe to
+    run from multiple workers at once."""
+    root = os.path.join(settings.MEDIA_ROOT, CHUNK_STAGING_DIR)
+    cutoff = time.time() - max_age_seconds
+    removed = 0
+    for dirpath, _dirs, filenames in os.walk(root):
+        for name in filenames:
+            if name == _CHUNK_SWEEP_MARKER:
+                continue
+            path = os.path.join(dirpath, name)
+            try:
+                if os.path.getmtime(path) < cutoff:
+                    os.remove(path)
+                    removed += 1
+            except OSError:
+                pass
+    return removed
+
+
+def _maybe_sweep_stale_chunks():
+    """Run a stale-chunk sweep at most once per CHUNK_SWEEP_MIN_INTERVAL, using a
+    marker file's mtime as a cross-worker, cross-restart throttle. Cheap enough to
+    call on every chunked-upload completion."""
+    marker = os.path.join(settings.MEDIA_ROOT, CHUNK_STAGING_DIR, _CHUNK_SWEEP_MARKER)
+    now = time.time()
+    try:
+        if os.path.exists(marker) and now - os.path.getmtime(marker) < CHUNK_SWEEP_MIN_INTERVAL:
+            return
+        # Touch the marker BEFORE sweeping so concurrent workers don't all sweep.
+        os.makedirs(os.path.dirname(marker), exist_ok=True)
+        with open(marker, "a"):
+            os.utime(marker, None)
+    except OSError:
+        return
+    _sweep_stale_chunks(CHUNK_MAX_AGE_SECONDS)
+
+
 @login_required
 def upload_chunk(request, folder_id=None):
     """Append one chunk of a large file to its staging .part file."""
@@ -403,6 +456,9 @@ def upload_chunk_complete(request, folder_id=None):
     )
     doc.file.name = rel_dest
     doc.save()
+
+    # Opportunistically clear abandoned staging files (throttled, in-process).
+    _maybe_sweep_stale_chunks()
 
     if request.headers.get("x-requested-with") == "XMLHttpRequest":
         return JsonResponse({"ok": True, "name": filename})

@@ -10,4 +10,9 @@ mkdir -p "$(dirname "${DJANGO_DB_PATH:-/app/data/db.sqlite3}")" \
 # Apply migrations against the mounted database before the server starts.
 python manage.py migrate --noinput
 
+# Clear any chunked-upload staging files left by interrupted uploads. A Sevalla
+# cron job can't mount this disk, so cleanup runs here (every deploy/restart) and
+# opportunistically in the web process; see files.views._maybe_sweep_stale_chunks.
+python manage.py cleanup_chunks --hours 24 || true
+
 exec "$@"

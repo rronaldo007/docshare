@@ -103,8 +103,12 @@ single files can be arbitrarily large -- the only real ceiling is your
 accordingly and optionally bound with `DJANGO_MAX_UPLOAD_BYTES`.
 
 An interrupted large upload leaves a staging `.part` file under
-`MEDIA_ROOT/.chunks/`. Run the cleanup command periodically (e.g. a daily cron)
-to remove abandoned ones:
+`MEDIA_ROOT/.chunks/`. These are cleaned automatically: the app sweeps stale
+staging files opportunistically after uploads (throttled to once an hour), and
+again on every deploy/restart via the entrypoint. Cleanup must run **in the web
+process**, which owns the disk -- a platform cron job (e.g. on Sevalla) runs as
+a separate process with no access to the persistent disk, so it can't be used
+here. You can also sweep manually:
 
 ```bash
 python manage.py cleanup_chunks --hours 24

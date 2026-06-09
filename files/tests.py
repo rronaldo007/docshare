@@ -1,6 +1,10 @@
+import shutil
+import tempfile
+import uuid
+
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.urls import reverse
 
 from .models import Document, Folder, ShareLink
@@ -105,3 +109,87 @@ class AnonymousUploadTests(TestCase):
         # The sixth upload from the same IP today is rejected; nothing is stored.
         self._upload()
         self.assertEqual(Document.objects.count(), 5)
+
+
+_CHUNK_MEDIA = tempfile.mkdtemp()
+
+
+@override_settings(MEDIA_ROOT=_CHUNK_MEDIA)
+class ChunkedUploadTests(TestCase):
+    """Large files upload as a sequence of chunks the server reassembles."""
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(_CHUNK_MEDIA, ignore_errors=True)
+        super().tearDownClass()
+
+    def setUp(self):
+        User = get_user_model()
+        self.user = User.objects.create_user(username="owner", password="pw")
+        self.client.force_login(self.user)
+        self.upload_id = str(uuid.uuid4())
+
+    def _send_chunk(self, offset, body):
+        return self.client.post(
+            reverse("upload_chunk_root"),
+            {
+                "upload_id": self.upload_id,
+                "offset": offset,
+                "chunk": SimpleUploadedFile("chunk", body),
+            },
+            HTTP_X_REQUESTED_WITH="XMLHttpRequest",
+        )
+
+    def _complete(self, path="big.txt"):
+        return self.client.post(
+            reverse("upload_chunk_complete_root"),
+            {"upload_id": self.upload_id, "path": path},
+            HTTP_X_REQUESTED_WITH="XMLHttpRequest",
+        )
+
+    def test_chunks_reassemble_into_one_document(self):
+        self.assertEqual(self._send_chunk(0, b"hello ").status_code, 200)
+        self.assertEqual(self._send_chunk(6, b"world").status_code, 200)
+        self.assertEqual(self._complete("greeting.txt").status_code, 200)
+
+        doc = Document.objects.get()
+        self.assertEqual(doc.owner, self.user)
+        self.assertEqual(doc.name, "greeting.txt")
+        self.assertEqual(doc.size, 11)
+        self.assertEqual(doc.file.open("rb").read(), b"hello world")
+
+    def test_offset_mismatch_is_rejected_for_resync(self):
+        self.assertEqual(self._send_chunk(0, b"hello ").status_code, 200)
+        # A chunk claiming the wrong offset must not corrupt the file; the server
+        # replies 409 with the byte count it actually has so the client resyncs.
+        resp = self._send_chunk(999, b"world")
+        self.assertEqual(resp.status_code, 409)
+        self.assertEqual(resp.json()["received"], 6)
+
+    def test_complete_without_staged_file_is_404(self):
+        self.assertEqual(self._complete().status_code, 404)
+
+    def test_bad_upload_id_is_rejected(self):
+        resp = self.client.post(
+            reverse("upload_chunk_root"),
+            {"upload_id": "../../etc/passwd", "offset": 0,
+             "chunk": SimpleUploadedFile("chunk", b"x")},
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_path_traversal_in_filename_is_neutralized(self):
+        self.assertEqual(self._send_chunk(0, b"data").status_code, 200)
+        self.assertEqual(self._complete("../../../etc/passwd").status_code, 200)
+
+        # The '..' segments are stripped: the file lands inside the user's tree
+        # as a folder "etc" containing "passwd", never outside MEDIA_ROOT.
+        doc = Document.objects.get()
+        self.assertEqual(doc.name, "passwd")
+        self.assertTrue(doc.file.name.startswith(f"user_{self.user.id}/"))
+        self.assertEqual(doc.folder.name, "etc")
+
+    def test_chunk_upload_requires_login(self):
+        self.client.logout()
+        resp = self._send_chunk(0, b"x")
+        self.assertEqual(resp.status_code, 302)
+        self.assertIn("/accounts/login/", resp["Location"])

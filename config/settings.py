@@ -130,6 +130,12 @@ ANON_MAX_UPLOAD_BYTES = int(
     os.environ.get("DJANGO_ANON_MAX_UPLOAD_BYTES", 50 * 1024 * 1024)  # 50 MB
 )
 
+# Optional cap on a single owner upload assembled via the chunked uploader.
+# 0 (the default) means unlimited. Set this when the persistent disk is finite
+# (e.g. on Sevalla) so one huge file can't fill it; the chunk endpoint rejects
+# the upload once the running total would exceed the cap. See files.views.
+MAX_UPLOAD_BYTES = int(os.environ.get("DJANGO_MAX_UPLOAD_BYTES", 0))
+
 # HTTPS-only hardening (secure cookies, HSTS, HTTP->HTTPS redirect). This only
 # makes sense when the app is actually served over TLS; enabling it on a plain
 # HTTP deployment makes the site unreachable (every request 301s to https and

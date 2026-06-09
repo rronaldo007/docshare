@@ -43,6 +43,8 @@
 
     <form id="folder-upload-form" method="post"
           action="{% if current %}{% url 'upload_folder' current.id %}{% else %}{% url 'upload_folder_root' %}{% endif %}"
+          data-chunk-url="{% if current %}{% url 'upload_chunk' current.id %}{% else %}{% url 'upload_chunk_root' %}{% endif %}"
+          data-chunk-complete-url="{% if current %}{% url 'upload_chunk_complete' current.id %}{% else %}{% url 'upload_chunk_complete_root' %}{% endif %}"
           enctype="multipart/form-data" class="w-full sm:w-auto">
         {% csrf_token %}
         <input id="folder-input" type="file" webkitdirectory directory multiple class="hidden">
@@ -167,6 +169,8 @@
         var progress = document.getElementById("drop-progress");
         var bar = document.getElementById("drop-progress-bar");
         var uploadUrl = form.action;
+        var chunkUrl = form.dataset.chunkUrl;
+        var chunkCompleteUrl = form.dataset.chunkCompleteUrl;
         var csrf = form.querySelector("[name=csrfmiddlewaretoken]").value;
         var defaultText = overlayText ? overlayText.textContent.trim() : "Drop to upload";
         var defaultSub = sub ? sub.textContent : "";
@@ -192,33 +196,32 @@
             alert("Upload failed. Please try again.");
         }
 
-        // Upload in batches bounded by file COUNT and cumulative SIZE, so each
-        // request stays well under the proxy's body limit (~100 MB) and the
-        // instance's memory. This is what makes very large folders (hundreds of
-        // files) upload reliably. Batches run sequentially; progress is overall.
+        // Small files post in batches bounded by file COUNT and cumulative SIZE,
+        // so each request stays well under the proxy's body limit (~100 MB).
+        // Files larger than the threshold can't fit in one request at all, so
+        // they go through the chunked uploader instead (sliced into parts the
+        // server reassembles). Progress is overall, by bytes, across both paths.
         var MAX_BATCH_FILES = 40;
-        var MAX_BATCH_BYTES = 40 * 1024 * 1024; // 40 MB
+        var MAX_BATCH_BYTES = 40 * 1024 * 1024;   // 40 MB per batched request
+        var CHUNK_THRESHOLD = 80 * 1024 * 1024;   // files over this are chunked
+        var CHUNK_SIZE = 25 * 1024 * 1024;        // 25 MB per chunk (< 100 MB cap)
+
+        function genUuid() {
+            if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
+            return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, function (c) {
+                var r = Math.random() * 16 | 0, v = c === "x" ? r : (r & 0x3 | 0x8);
+                return v.toString(16);
+            });
+        }
 
         function uploadPairs(pairs) {
             pairs = pairs.filter(function (p) { return p && p.file; });
             if (!pairs.length || uploading) return;
             uploading = true;
 
-            var batches = [], cur = [], curBytes = 0;
-            pairs.forEach(function (p) {
-                var sz = p.file.size || 0;
-                if (cur.length && (cur.length >= MAX_BATCH_FILES || curBytes + sz > MAX_BATCH_BYTES)) {
-                    batches.push(cur); cur = []; curBytes = 0;
-                }
-                cur.push(p);
-                curBytes += sz;
-            });
-            if (cur.length) batches.push(cur);
-
             var totalBytes = pairs.reduce(function (a, p) { return a + (p.file.size || 0); }, 0) || 1;
             var totalFiles = pairs.length;
-            var sentBytes = 0;
-            var i = 0;
+            var doneBytes = 0;  // bytes of fully-completed units (batches + files)
 
             showOverlay();
             if (sub) sub.textContent = "";
@@ -226,51 +229,171 @@
             if (bar) bar.style.width = "0%";
 
             function fileWord() { return totalFiles === 1 ? "file" : "files"; }
+            function live(currentLoaded) {
+                var loaded = doneBytes + currentLoaded;
+                var pct = Math.min(99, Math.round((loaded / totalBytes) * 100));
+                if (bar) bar.style.width = pct + "%";
+                if (overlayText) {
+                    overlayText.textContent =
+                        "Uploading " + totalFiles + " " + fileWord() + "… " + pct + "%";
+                }
+                if (sub) sub.textContent = humanSize(loaded) + " of " + humanSize(totalBytes);
+            }
             function finish() {
                 if (bar) bar.style.width = "100%";
                 if (overlayText) overlayText.textContent = "Finishing up…";
                 window.location.reload();
             }
-            function sendNext() {
-                if (i >= batches.length) { finish(); return; }
-                var batch = batches[i];
-                var batchBytes = 0;
-                var data = new FormData();
-                data.append("csrfmiddlewaretoken", csrf);
-                batch.forEach(function (p) {
-                    data.append("files", p.file);
-                    data.append("paths", p.path || p.file.name);
-                    batchBytes += p.file.size || 0;
-                });
 
-                var xhr = new XMLHttpRequest();
-                xhr.open("POST", uploadUrl, true);
-                xhr.setRequestHeader("X-Requested-With", "XMLHttpRequest");
-                xhr.upload.addEventListener("progress", function (e) {
-                    if (!e.lengthComputable) return;
-                    var loaded = sentBytes + e.loaded;
-                    var pct = Math.min(99, Math.round((loaded / totalBytes) * 100));
-                    if (bar) bar.style.width = pct + "%";
-                    if (overlayText) {
-                        overlayText.textContent =
-                            "Uploading " + totalFiles + " " + fileWord() + "… " + pct + "%";
+            var small = [], big = [];
+            pairs.forEach(function (p) {
+                if ((p.file.size || 0) > CHUNK_THRESHOLD) big.push(p); else small.push(p);
+            });
+
+            // Send the small files (batched) first, then the large files (chunked),
+            // committing each unit's bytes to doneBytes as it lands.
+            uploadSmallBatches(small, live, function (n) { doneBytes += n; })
+                .then(function () {
+                    return uploadBigSequential(big, live, function (n) { doneBytes += n; });
+                })
+                .then(finish)
+                .catch(failUpload);
+        }
+
+        function uploadSmallBatches(pairs, live, commit) {
+            return new Promise(function (resolve, reject) {
+                if (!pairs.length) { resolve(); return; }
+                var batches = [], cur = [], curBytes = 0;
+                pairs.forEach(function (p) {
+                    var sz = p.file.size || 0;
+                    if (cur.length && (cur.length >= MAX_BATCH_FILES || curBytes + sz > MAX_BATCH_BYTES)) {
+                        batches.push(cur); cur = []; curBytes = 0;
                     }
-                    if (sub) sub.textContent = humanSize(loaded) + " of " + humanSize(totalBytes);
+                    cur.push(p);
+                    curBytes += sz;
                 });
-                xhr.addEventListener("load", function () {
-                    if (xhr.status >= 200 && xhr.status < 400) {
-                        sentBytes += batchBytes;
+                if (cur.length) batches.push(cur);
+
+                var i = 0;
+                function sendNext() {
+                    if (i >= batches.length) { resolve(); return; }
+                    var batch = batches[i];
+                    var batchBytes = 0;
+                    var data = new FormData();
+                    data.append("csrfmiddlewaretoken", csrf);
+                    batch.forEach(function (p) {
+                        data.append("files", p.file);
+                        data.append("paths", p.path || p.file.name);
+                        batchBytes += p.file.size || 0;
+                    });
+
+                    var xhr = new XMLHttpRequest();
+                    xhr.open("POST", uploadUrl, true);
+                    xhr.setRequestHeader("X-Requested-With", "XMLHttpRequest");
+                    xhr.upload.addEventListener("progress", function (e) {
+                        if (e.lengthComputable) live(e.loaded);
+                    });
+                    xhr.addEventListener("load", function () {
+                        if (xhr.status >= 200 && xhr.status < 400) {
+                            commit(batchBytes);
+                            live(0);
+                            i++;
+                            sendNext();
+                        } else {
+                            reject();
+                        }
+                    });
+                    xhr.addEventListener("error", reject);
+                    xhr.addEventListener("abort", reject);
+                    xhr.send(data);
+                }
+                sendNext();
+            });
+        }
+
+        function uploadBigSequential(pairs, live, commit) {
+            return new Promise(function (resolve, reject) {
+                var i = 0;
+                function nextFile() {
+                    if (i >= pairs.length) { resolve(); return; }
+                    uploadOneBig(pairs[i], live, commit).then(function () {
                         i++;
-                        sendNext();
-                    } else {
-                        failUpload();
-                    }
-                });
-                xhr.addEventListener("error", failUpload);
-                xhr.addEventListener("abort", failUpload);
-                xhr.send(data);
-            }
-            sendNext();
+                        nextFile();
+                    }).catch(reject);
+                }
+                nextFile();
+            });
+        }
+
+        // Slice one large file into chunks and POST them in order. The server
+        // appends each to a staging file and reassembles on complete. A chunk
+        // that lands out of sync gets a 409 carrying the server's byte count, so
+        // we resync and resume rather than corrupt the upload.
+        function uploadOneBig(pair, live, commit) {
+            return new Promise(function (resolve, reject) {
+                var file = pair.file;
+                var path = pair.path || file.name;
+                var uploadId = genUuid();
+                var offset = 0;
+
+                function sendChunk() {
+                    if (offset >= file.size) { complete(); return; }
+                    var end = Math.min(offset + CHUNK_SIZE, file.size);
+                    var startedAt = offset;
+                    var data = new FormData();
+                    data.append("csrfmiddlewaretoken", csrf);
+                    data.append("upload_id", uploadId);
+                    data.append("offset", startedAt);
+                    data.append("chunk", file.slice(startedAt, end));
+
+                    var xhr = new XMLHttpRequest();
+                    xhr.open("POST", chunkUrl, true);
+                    xhr.setRequestHeader("X-Requested-With", "XMLHttpRequest");
+                    xhr.upload.addEventListener("progress", function (e) {
+                        if (e.lengthComputable) live(startedAt + e.loaded);
+                    });
+                    xhr.addEventListener("load", function () {
+                        if (xhr.status >= 200 && xhr.status < 300) {
+                            offset = end;
+                            sendChunk();
+                        } else if (xhr.status === 409) {
+                            try { offset = (JSON.parse(xhr.responseText).received) || 0; }
+                            catch (_) { offset = 0; }
+                            sendChunk();
+                        } else {
+                            reject();
+                        }
+                    });
+                    xhr.addEventListener("error", reject);
+                    xhr.addEventListener("abort", reject);
+                    xhr.send(data);
+                }
+
+                function complete() {
+                    var data = new FormData();
+                    data.append("csrfmiddlewaretoken", csrf);
+                    data.append("upload_id", uploadId);
+                    data.append("path", path);
+
+                    var xhr = new XMLHttpRequest();
+                    xhr.open("POST", chunkCompleteUrl, true);
+                    xhr.setRequestHeader("X-Requested-With", "XMLHttpRequest");
+                    xhr.addEventListener("load", function () {
+                        if (xhr.status >= 200 && xhr.status < 300) {
+                            commit(file.size);
+                            live(0);
+                            resolve();
+                        } else {
+                            reject();
+                        }
+                    });
+                    xhr.addEventListener("error", reject);
+                    xhr.addEventListener("abort", reject);
+                    xhr.send(data);
+                }
+
+                sendChunk();
+            });
         }
 
         // "Upload folder" button -> native directory picker.

@@ -1,4 +1,6 @@
 import mimetypes
+import os
+import uuid
 import zipfile
 from datetime import timedelta
 
@@ -7,14 +9,18 @@ from django.contrib import messages
 from django.contrib.auth import get_user_model
 from django.contrib.auth.decorators import login_required
 from django.core.cache import cache
+from django.core.files.storage import default_storage
 from django.http import (
     FileResponse,
     Http404,
     HttpResponse,
+    HttpResponseBadRequest,
+    JsonResponse,
     StreamingHttpResponse,
 )
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
+from django.utils.text import get_valid_filename
 
 from .forms import DocumentForm, FolderForm, ShareForm
 from .models import Document, Folder, ShareLink
@@ -35,7 +41,7 @@ INLINE_CONTENT_TYPES = {
 }
 
 
-def _safe_content_type(upload, filename=None):
+def _safe_content_type(upload=None, filename=None):
     """Derive a stored Content-Type WITHOUT trusting the client-supplied header.
 
     The browser-sent multipart Content-Type is attacker-controlled, so a file
@@ -43,8 +49,11 @@ def _safe_content_type(upload, filename=None):
     script. We instead guess from the (server-side) filename extension, and only
     accept a client header when it maps to a known-safe inline type. Everything
     else falls back to application/octet-stream and is served as a download.
+
+    `upload` is optional: a chunked upload has no single upload object at
+    finalize time, so it passes only the filename (extension-based guess only).
     """
-    name = filename or upload.name or ""
+    name = filename or (upload.name if upload else "") or ""
     guessed = mimetypes.guess_type(name)[0]
     if guessed and guessed.lower() in INLINE_CONTENT_TYPES:
         return guessed.lower()
@@ -268,6 +277,136 @@ def upload_folder(request, folder_id=None):
     messages.success(
         request, f"Uploaded {created} file{'' if created == 1 else 's'}."
     )
+    return redirect(parent.get_absolute_url() if parent else "browse")
+
+
+# ---------- Chunked upload (large files) ----------
+#
+# Cloudflare (in front of the app on Sevalla) rejects any single request body
+# over ~100 MB, so a large file cannot be POSTed in one shot. The browser slices
+# it into sub-100 MB chunks and sends them here one at a time; we append each to
+# a single .part file on the persistent disk, then os.replace it straight into
+# final storage (no second copy -- important for multi-GB files). The server
+# keeps NO per-upload state between requests (the .part file's size IS the
+# state), so it stays correct across multiple gunicorn workers.
+
+CHUNK_STAGING_DIR = ".chunks"  # lives under MEDIA_ROOT, which is never web-served
+
+
+def _chunk_part_path(user_id, upload_id):
+    return os.path.join(
+        settings.MEDIA_ROOT, CHUNK_STAGING_DIR, f"user_{user_id}", f"{upload_id}.part"
+    )
+
+
+def _validated_upload_id(raw):
+    """Reject anything that is not a plain UUID, so a crafted upload_id can never
+    traverse out of the per-user staging directory."""
+    try:
+        return str(uuid.UUID(str(raw)))
+    except (ValueError, TypeError, AttributeError):
+        return None
+
+
+def _safe_remove(path):
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+@login_required
+def upload_chunk(request, folder_id=None):
+    """Append one chunk of a large file to its staging .part file."""
+    if request.method != "POST":
+        return redirect("browse")
+    upload_id = _validated_upload_id(request.POST.get("upload_id"))
+    chunk = request.FILES.get("chunk")
+    if upload_id is None or chunk is None:
+        return HttpResponseBadRequest("Bad chunk upload.")
+
+    part_path = _chunk_part_path(request.user.id, upload_id)
+    os.makedirs(os.path.dirname(part_path), exist_ok=True)
+    current = os.path.getsize(part_path) if os.path.exists(part_path) else 0
+
+    # The client tells us the byte offset it believes it is writing at. If that
+    # disagrees with what we already have, refuse rather than corrupt the file
+    # by appending in the wrong place -- report our size so the client resyncs
+    # and resumes (this is what makes a dropped chunk mid-upload recoverable).
+    offset = request.POST.get("offset")
+    if offset is not None:
+        try:
+            offset = int(offset)
+        except (TypeError, ValueError):
+            return HttpResponseBadRequest("Bad offset.")
+        if offset != current:
+            return JsonResponse({"received": current}, status=409)
+
+    # Optional hard cap so a single huge file can't silently fill the disk.
+    max_bytes = getattr(settings, "MAX_UPLOAD_BYTES", 0)
+    if max_bytes and current + chunk.size > max_bytes:
+        _safe_remove(part_path)
+        return HttpResponseBadRequest("File exceeds the maximum allowed size.")
+
+    with open(part_path, "ab") as dest:
+        for piece in chunk.chunks():
+            dest.write(piece)
+
+    return JsonResponse({"received": os.path.getsize(part_path)})
+
+
+@login_required
+def upload_chunk_complete(request, folder_id=None):
+    """Finalize a chunked upload: move the assembled file into storage and create
+    the Document. Mirrors upload_folder's path handling so a large file dropped
+    inside a folder rebuilds its subfolder structure too."""
+    if request.method != "POST":
+        return redirect("browse")
+    upload_id = _validated_upload_id(request.POST.get("upload_id"))
+    if upload_id is None:
+        return HttpResponseBadRequest("Bad upload id.")
+    part_path = _chunk_part_path(request.user.id, upload_id)
+    if not os.path.exists(part_path):
+        raise Http404
+
+    parent = None
+    if folder_id is not None:
+        parent = get_object_or_404(Folder, pk=folder_id, owner=request.user)
+
+    # Sanitize the path exactly like upload_folder: drop empty/./.. segments so a
+    # crafted name can never escape the user's own folder tree.
+    rel = (request.POST.get("path") or "").replace("\\", "/")
+    parts = [p for p in rel.split("/") if p not in ("", ".", "..")]
+    if not parts:
+        _safe_remove(part_path)
+        return HttpResponseBadRequest("Missing filename.")
+    *dirs, filename = parts
+    folder = _get_or_create_path(request.user, parent, dirs)
+
+    size = os.path.getsize(part_path)
+    # Build the same kind of unguessable, per-file storage path the model's
+    # upload_to would, then place the already-assembled file there with a rename
+    # (atomic, same filesystem, no multi-GB second copy). doc.name keeps the
+    # original filename for the UI; the stored path uses a sanitized basename.
+    safe_name = get_valid_filename(filename) or "file"
+    rel_dest = f"user_{request.user.id}/{uuid.uuid4().hex}/{safe_name}"
+    abs_dest = default_storage.path(rel_dest)
+    os.makedirs(os.path.dirname(abs_dest), exist_ok=True)
+    os.replace(part_path, abs_dest)
+
+    doc = Document(
+        owner=request.user,
+        folder=folder,
+        name=filename,
+        size=size,
+        content_type=_safe_content_type(filename=filename),
+    )
+    doc.file.name = rel_dest
+    doc.save()
+
+    if request.headers.get("x-requested-with") == "XMLHttpRequest":
+        return JsonResponse({"ok": True, "name": filename})
+    messages.success(request, f"Uploaded '{filename}'.")
     return redirect(parent.get_absolute_url() if parent else "browse")
 
 

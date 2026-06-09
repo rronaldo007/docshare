@@ -18,6 +18,11 @@ urlpatterns = [
     path("folder/<int:folder_id>/upload/", views.upload_document, name="upload"),
     path("upload-folder/", views.upload_folder, name="upload_folder_root"),
     path("folder/<int:folder_id>/upload-folder/", views.upload_folder, name="upload_folder"),
+    # Large-file chunked upload (bypasses the ~100 MB proxy body limit)
+    path("upload/chunk/", views.upload_chunk, name="upload_chunk_root"),
+    path("folder/<int:folder_id>/upload/chunk/", views.upload_chunk, name="upload_chunk"),
+    path("upload/chunk/complete/", views.upload_chunk_complete, name="upload_chunk_complete_root"),
+    path("folder/<int:folder_id>/upload/chunk/complete/", views.upload_chunk_complete, name="upload_chunk_complete"),
     path("doc/<int:doc_id>/preview/", views.preview_document, name="preview_document"),
     path("doc/<int:doc_id>/inline/", views.inline_document, name="inline_document"),
     path("doc/<int:doc_id>/download/", views.download_document, name="download_document"),

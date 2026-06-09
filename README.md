@@ -71,6 +71,9 @@ Other supported variables:
   so a client cannot spoof the header to defeat the anonymous-upload limit.
 - `DJANGO_ANON_MAX_UPLOAD_BYTES` - per-file cap for no-account uploads
   (default 50 MB). Logged-in uploads stay uncapped.
+- `DJANGO_MAX_UPLOAD_BYTES` - optional cap on a single logged-in upload
+  assembled via the chunked uploader. `0` (default) means unlimited; set it
+  when the persistent disk is finite so one huge file can't fill it.
 - `DJANGO_HTTPS` - HTTPS-only hardening (secure cookies, HSTS, HTTP→HTTPS
   redirect). Defaults **on** when `DEBUG=False`. Set it to `False` for a
   `DEBUG=False` container served over plain HTTP (the bundled `docker-compose`
@@ -87,6 +90,25 @@ Other supported variables:
   mistaken for a hung worker and SIGKILLed at `GUNICORN_TIMEOUT` mid-stream. Do
   not switch back to the `sync` worker class for this app unless you also raise
   `GUNICORN_TIMEOUT` high enough to cover the slowest expected download.
+
+## Large file uploads
+
+A reverse proxy in front of the app (e.g. Cloudflare, which fronts Sevalla)
+typically rejects any single request body over ~100 MB. So a logged-in upload
+larger than ~80 MB is sliced in the browser into smaller chunks, sent one at a
+time, and reassembled server-side into the final file (smaller files and folder
+uploads still post in batches as before). This bypasses the proxy body limit, so
+single files can be arbitrarily large -- the only real ceiling is your
+**persistent disk** (each file is stored whole on disk), which you should size
+accordingly and optionally bound with `DJANGO_MAX_UPLOAD_BYTES`.
+
+An interrupted large upload leaves a staging `.part` file under
+`MEDIA_ROOT/.chunks/`. Run the cleanup command periodically (e.g. a daily cron)
+to remove abandoned ones:
+
+```bash
+python manage.py cleanup_chunks --hours 24
+```
 
 ## How sharing works
 

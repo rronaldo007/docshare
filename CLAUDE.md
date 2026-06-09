@@ -72,6 +72,15 @@ There is no test suite yet. If you add features, add tests under
   through the guarded views via `_serve_file`; the `/media/` route exists only
   under `DEBUG`. Do not add `doc.file.url` to a template or re-enable public
   media — that bypasses every guard above.
+- **Large uploads are chunked, not single-request.** A reverse proxy (Cloudflare
+  on Sevalla) caps a single request body at ~100 MB. Files over ~80 MB are
+  sliced client-side and POSTed to `upload_chunk` / `upload_chunk_complete`,
+  which append to a per-user staging file under `MEDIA_ROOT/.chunks/` (never
+  web-served) and `os.replace` it into final storage (no multi-GB second copy).
+  The server keeps NO state between chunk requests — the `.part` file's size is
+  the state — so it stays correct across multiple gunicorn workers. These views
+  are owner-scoped; `upload_id` must be a UUID and paths are sanitized exactly
+  like `upload_folder`. Don't add chunked uploads to the anonymous path.
 - **File delivery is XSS-safe by construction.** Content-Type is re-derived
   server-side with `_safe_content_type` (the client-sent header is untrusted),
   and only the `INLINE_CONTENT_TYPES` allowlist (images/PDF/plain text) is
@@ -94,8 +103,9 @@ There is no test suite yet. If you add features, add tests under
 ## Current state
 
 Working and tested end to end (`files/tests.py`): signup/login, nested folders,
-single-file upload, whole-folder upload (rebuilds the tree), folder move, inline
-previews, public share links with optional expiry and optional password, link
+single-file upload, whole-folder upload (rebuilds the tree), chunked large-file
+upload (bypasses the ~100 MB proxy body limit), folder move, inline previews,
+public share links with optional expiry and optional password, link
 management + revoke. A security audit hardened file serving, share-link
 creation, the anonymous-upload path, and production settings — see the
 conventions above and the README's production notes.

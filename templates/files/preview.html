@@ -16,6 +16,37 @@
         <iframe src="{% url 'inline_document' doc.id %}" class="w-full h-[80vh] rounded border border-slate-200"></iframe>
     {% elif doc.kind == 'text' %}
         <iframe src="{% url 'inline_document' doc.id %}" class="w-full h-[70vh] rounded border border-slate-200 bg-slate-50"></iframe>
+    {% elif is_zip %}
+        {% if zip_too_large %}
+            <div class="text-center py-12 text-slate-500 text-sm">
+                This archive is too large to list here.<br>
+                <a href="{% url 'download_document' doc.id %}" class="text-indigo-600 hover:underline">Download it instead</a>.
+            </div>
+        {% elif zip_error %}
+            <div class="text-center py-12 text-slate-500 text-sm">
+                Couldn't read this archive.<br>
+                <a href="{% url 'download_document' doc.id %}" class="text-indigo-600 hover:underline">Download it instead</a>.
+            </div>
+        {% elif zip_entries %}
+            <p class="text-xs text-slate-400 mb-3">{{ zip_entries|length }} file{{ zip_entries|length|pluralize }} in this archive</p>
+            <ul class="divide-y divide-slate-100">
+                {% for e in zip_entries %}
+                <li class="flex items-center justify-between gap-3 py-2">
+                    <span class="flex items-center gap-2 min-w-0">
+                        <span class="text-slate-400">📄</span>
+                        <span class="truncate text-slate-800 text-sm">{{ e.name }}</span>
+                    </span>
+                    <span class="flex items-center gap-3 text-xs shrink-0">
+                        <span class="text-slate-400">{{ e.size|filesizeformat }}</span>
+                        <a href="{% url 'zip_entry' doc.id %}?path={{ e.name|urlencode }}"
+                           target="_blank" rel="noopener" class="text-indigo-600 hover:underline">Open</a>
+                    </span>
+                </li>
+                {% endfor %}
+            </ul>
+        {% else %}
+            <div class="text-center py-12 text-slate-500 text-sm">This archive is empty.</div>
+        {% endif %}
     {% else %}
         <div class="text-center py-12 text-slate-500 text-sm">
             No inline preview available for this file type.<br>

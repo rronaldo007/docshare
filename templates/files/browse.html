@@ -45,6 +45,10 @@
           action="{% if current %}{% url 'upload_folder' current.id %}{% else %}{% url 'upload_folder_root' %}{% endif %}"
           data-chunk-url="{% if current %}{% url 'upload_chunk' current.id %}{% else %}{% url 'upload_chunk_root' %}{% endif %}"
           data-chunk-complete-url="{% if current %}{% url 'upload_chunk_complete' current.id %}{% else %}{% url 'upload_chunk_complete_root' %}{% endif %}"
+          {% if direct_upload %}data-direct-upload="1"
+          data-presign-url="{% if current %}{% url 'presign_upload' current.id %}{% else %}{% url 'presign_upload_root' %}{% endif %}"
+          data-commit-url="{% if current %}{% url 'commit_upload' current.id %}{% else %}{% url 'commit_upload_root' %}{% endif %}"
+          data-direct-max="{{ direct_upload_max }}"{% endif %}
           enctype="multipart/form-data" class="w-full sm:w-auto">
         {% csrf_token %}
         <input id="folder-input" type="file" webkitdirectory directory multiple class="hidden">
@@ -171,6 +175,11 @@
         var uploadUrl = form.action;
         var chunkUrl = form.dataset.chunkUrl;
         var chunkCompleteUrl = form.dataset.chunkCompleteUrl;
+        // Presigned direct-to-bucket upload (only when the server enables it).
+        var directUpload = form.dataset.directUpload === "1";
+        var presignUrl = form.dataset.presignUrl;
+        var commitUrl = form.dataset.commitUrl;
+        var directMax = parseInt(form.dataset.directMax || "0", 10) || (5 * 1024 * 1024 * 1024);
         var csrf = form.querySelector("[name=csrfmiddlewaretoken]").value;
         var defaultText = overlayText ? overlayText.textContent.trim() : "Drop to upload";
         var defaultSub = sub ? sub.textContent : "";
@@ -243,6 +252,24 @@
                 if (bar) bar.style.width = "100%";
                 if (overlayText) overlayText.textContent = "Finishing up…";
                 window.location.reload();
+            }
+
+            // With direct uploads on, every file goes straight to the bucket
+            // (presign -> PUT -> commit), except any over the single-PUT ceiling,
+            // which fall back to the chunked uploader. The bytes of direct uploads
+            // never transit the app or the proxy body limit.
+            if (directUpload) {
+                var direct = [], huge = [];
+                pairs.forEach(function (p) {
+                    if ((p.file.size || 0) > directMax) huge.push(p); else direct.push(p);
+                });
+                uploadDirectSequential(direct, live, function (n) { doneBytes += n; })
+                    .then(function () {
+                        return uploadBigSequential(huge, live, function (n) { doneBytes += n; });
+                    })
+                    .then(finish)
+                    .catch(failUpload);
+                return;
             }
 
             var small = [], big = [];
@@ -393,6 +420,89 @@
                 }
 
                 sendChunk();
+            });
+        }
+
+        function uploadDirectSequential(pairs, live, commit) {
+            return new Promise(function (resolve, reject) {
+                var i = 0;
+                function nextFile() {
+                    if (i >= pairs.length) { resolve(); return; }
+                    uploadOneDirect(pairs[i], live, commit).then(function () {
+                        i++;
+                        nextFile();
+                    }).catch(reject);
+                }
+                nextFile();
+            });
+        }
+
+        // Direct-to-bucket upload in three steps: (1) ask the app for a presigned
+        // PUT URL and the server-chosen object key, (2) PUT the file bytes straight
+        // to the bucket, (3) ask the app to record the Document. Steps 1 and 3 are
+        // tiny guarded JSON calls; only step 2 carries the bytes, and it bypasses
+        // both the app and the proxy body limit.
+        function uploadOneDirect(pair, live, commit) {
+            return new Promise(function (resolve, reject) {
+                var file = pair.file;
+                var path = pair.path || file.name;
+
+                function presign() {
+                    var data = new FormData();
+                    data.append("csrfmiddlewaretoken", csrf);
+                    data.append("filename", file.name);
+                    var xhr = new XMLHttpRequest();
+                    xhr.open("POST", presignUrl, true);
+                    xhr.setRequestHeader("X-Requested-With", "XMLHttpRequest");
+                    xhr.addEventListener("load", function () {
+                        if (xhr.status < 200 || xhr.status >= 300) { reject(); return; }
+                        var info;
+                        try { info = JSON.parse(xhr.responseText); } catch (_) { reject(); return; }
+                        putBytes(info.url, info.key);
+                    });
+                    xhr.addEventListener("error", reject);
+                    xhr.addEventListener("abort", reject);
+                    xhr.send(data);
+                }
+
+                function putBytes(url, key) {
+                    var xhr = new XMLHttpRequest();
+                    xhr.open("PUT", url, true);
+                    xhr.upload.addEventListener("progress", function (e) {
+                        if (e.lengthComputable) live(e.loaded);
+                    });
+                    xhr.addEventListener("load", function () {
+                        if (xhr.status >= 200 && xhr.status < 300) commitDoc(key);
+                        else reject();
+                    });
+                    xhr.addEventListener("error", reject);
+                    xhr.addEventListener("abort", reject);
+                    xhr.send(file);
+                }
+
+                function commitDoc(key) {
+                    var data = new FormData();
+                    data.append("csrfmiddlewaretoken", csrf);
+                    data.append("key", key);
+                    data.append("path", path);
+                    var xhr = new XMLHttpRequest();
+                    xhr.open("POST", commitUrl, true);
+                    xhr.setRequestHeader("X-Requested-With", "XMLHttpRequest");
+                    xhr.addEventListener("load", function () {
+                        if (xhr.status >= 200 && xhr.status < 300) {
+                            commit(file.size);
+                            live(0);
+                            resolve();
+                        } else {
+                            reject();
+                        }
+                    });
+                    xhr.addEventListener("error", reject);
+                    xhr.addEventListener("abort", reject);
+                    xhr.send(data);
+                }
+
+                presign();
             });
         }
 

@@ -94,6 +94,17 @@ There is no test suite yet. If you add features, add tests under
   workers. These views
   are owner-scoped; `upload_id` must be a UUID and paths are sanitized exactly
   like `upload_folder`. Don't add chunked uploads to the anonymous path.
+- **Direct uploads (when enabled) are guarded and fail closed.** With
+  `DJANGO_DIRECT_UPLOAD=1` (object storage only; off by default) the browser PUTs
+  bytes straight to the bucket via a presigned URL, then `commit_upload` records
+  the Document. The bytes skip the app, so the guards move to the edges:
+  `presign_upload` mints the object key server-side under `user_{id}/` (a client
+  never supplies or influences the prefix), and `commit_upload` REFUSES any key
+  outside that prefix or of the wrong `user_{id}/{hex}/{name}` shape, refuses any
+  object that isn't actually in the bucket, and reads the size from the bucket
+  (never the client). Both are `@login_required` and 404 when the flag is off.
+  Keep these invariants if you touch the direct-upload path; don't trust any
+  client-supplied key, size, or content-type.
 - **File delivery is XSS-safe by construction.** Content-Type is re-derived
   server-side with `_safe_content_type` (the client-sent header is untrusted),
   and only the `INLINE_CONTENT_TYPES` allowlist (images/PDF/plain text) is

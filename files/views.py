@@ -144,6 +144,8 @@ def browse(request, folder_id=None):
             "documents": documents,
             "folder_form": FolderForm(),
             "document_form": DocumentForm(),
+            "direct_upload": settings.DIRECT_UPLOAD_ENABLED,
+            "direct_upload_max": settings.DIRECT_UPLOAD_MAX_BYTES,
         },
     )
 
@@ -484,6 +486,102 @@ def upload_chunk_complete(request, folder_id=None):
 
     # Opportunistically clear abandoned staging files (throttled, in-process).
     _maybe_sweep_stale_chunks()
+
+    if request.headers.get("x-requested-with") == "XMLHttpRequest":
+        return JsonResponse({"ok": True, "name": filename})
+    messages.success(request, f"Uploaded '{filename}'.")
+    return redirect(parent.get_absolute_url() if parent else "browse")
+
+
+# ---------- Presigned direct-to-bucket upload (object storage only) ----------
+#
+# When DIRECT_UPLOAD_ENABLED, the browser uploads file bytes straight to the
+# bucket and the app only mints the URL and records the result -- the bytes never
+# transit this app or the ~100 MB proxy body limit. Both endpoints are gated on
+# the flag, owner-scoped, and fail closed: the object key is server-minted under
+# the user's own prefix, and commit refuses any key outside that prefix or any
+# object that was not actually uploaded. Size is read from the bucket, never the
+# client. (Buckets stay private; delivery still streams through _serve_file.)
+
+def _presigned_put_url(key):
+    """Short-lived presigned S3/R2 PUT URL for one server-chosen object key."""
+    client = default_storage.connection.meta.client
+    return client.generate_presigned_url(
+        "put_object",
+        Params={"Bucket": default_storage.bucket_name, "Key": key},
+        ExpiresIn=settings.DIRECT_UPLOAD_EXPIRY,
+    )
+
+
+@login_required
+def presign_upload(request, folder_id=None):
+    """Return a presigned PUT URL plus the object key the browser must upload to.
+
+    The key is generated server-side under user_{id}/ so a client can never
+    presign a write outside its own prefix; the filename only contributes a
+    sanitized basename for display/extension.
+    """
+    if not settings.DIRECT_UPLOAD_ENABLED:
+        raise Http404
+    if request.method != "POST":
+        return HttpResponseBadRequest("POST required.")
+    if folder_id is not None:
+        get_object_or_404(Folder, pk=folder_id, owner=request.user)
+
+    raw = (request.POST.get("filename") or "").replace("\\", "/")
+    safe_name = get_valid_filename(os.path.basename(raw)) or "file"
+    key = f"user_{request.user.id}/{uuid.uuid4().hex}/{safe_name}"
+    return JsonResponse({"url": _presigned_put_url(key), "key": key})
+
+
+@login_required
+def commit_upload(request, folder_id=None):
+    """Record a Document for a file the browser uploaded directly to the bucket.
+
+    Fails closed: the key MUST sit inside this user's own prefix and match the
+    exact server-minted shape, and the object MUST actually exist in the bucket.
+    The stored size is read from the bucket, never trusted from the client. The
+    path rebuilds the subfolder tree exactly like upload_folder / chunk-complete.
+    """
+    if not settings.DIRECT_UPLOAD_ENABLED:
+        raise Http404
+    if request.method != "POST":
+        return HttpResponseBadRequest("POST required.")
+    parent = None
+    if folder_id is not None:
+        parent = get_object_or_404(Folder, pk=folder_id, owner=request.user)
+
+    # The key was minted by presign_upload as user_{id}/{hex}/{name}: exactly two
+    # slashes, this user's prefix, no traversal. Reject anything else so a client
+    # cannot claim another user's object or an arbitrary key.
+    key = (request.POST.get("key") or "").strip()
+    prefix = f"user_{request.user.id}/"
+    if not key.startswith(prefix) or ".." in key or key.count("/") != 2:
+        return HttpResponseBadRequest("Bad object key.")
+    if not default_storage.exists(key):
+        raise Http404  # nothing was actually uploaded under this key
+
+    rel = (request.POST.get("path") or "").replace("\\", "/")
+    parts = [p for p in rel.split("/") if p not in ("", ".", "..")]
+    if not parts:
+        return HttpResponseBadRequest("Missing filename.")
+    *dirs, filename = parts
+    folder = _get_or_create_path(request.user, parent, dirs)
+
+    size = default_storage.size(key)  # authoritative, from the bucket
+    if settings.MAX_UPLOAD_BYTES and size > settings.MAX_UPLOAD_BYTES:
+        default_storage.delete(key)
+        return HttpResponseBadRequest("File too large.")
+
+    doc = Document(
+        owner=request.user,
+        folder=folder,
+        name=filename,
+        size=size,
+        content_type=_safe_content_type(filename=filename),
+    )
+    doc.file.name = key
+    doc.save()
 
     if request.headers.get("x-requested-with") == "XMLHttpRequest":
         return JsonResponse({"ok": True, "name": filename})

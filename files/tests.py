@@ -336,3 +336,138 @@ class ChunkedUploadToObjectStorageTests(TestCase):
         for root, _dirs, files in os.walk(chunks_dir):
             leftover += [f for f in files if f.endswith(".part")]
         self.assertEqual(leftover, [])
+
+
+# A real S3Storage configured with dummy creds: presigning is a local HMAC, so
+# it generates a valid URL without any network. Used to exercise presign_upload.
+_S3_TEST_STORAGE = {
+    "default": {
+        "BACKEND": "storages.backends.s3.S3Storage",
+        "OPTIONS": {
+            "bucket_name": "test-bucket",
+            "access_key": "k",
+            "secret_key": "s",
+            "endpoint_url": "https://acc.r2.cloudflarestorage.com",
+            "region_name": "auto",
+            "signature_version": "s3v4",
+            "addressing_style": "path",
+        },
+    },
+    "staticfiles": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
+}
+
+
+@override_settings(STORAGES=_S3_TEST_STORAGE, DIRECT_UPLOAD_ENABLED=True)
+class PresignUploadTests(TestCase):
+    """presign_upload hands out a signed PUT URL for a server-chosen, per-user key."""
+
+    def setUp(self):
+        User = get_user_model()
+        self.user = User.objects.create_user(username="owner", password="pw")
+        self.other = User.objects.create_user(username="intruder", password="pw")
+        self.client.force_login(self.user)
+
+    def _presign(self, url_name, *args, filename="movie.mp4"):
+        return self.client.post(
+            reverse(url_name, args=args),
+            {"filename": filename},
+            HTTP_X_REQUESTED_WITH="XMLHttpRequest",
+        )
+
+    def test_returns_signed_url_and_namespaced_key(self):
+        resp = self._presign("presign_upload_root")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        # Key is minted server-side under the user's own prefix; the client's
+        # filename only contributes a sanitized basename.
+        self.assertTrue(data["key"].startswith(f"user_{self.user.id}/"))
+        self.assertTrue(data["key"].endswith("movie.mp4"))
+        self.assertEqual(data["key"].count("/"), 2)
+        self.assertIn("X-Amz-Signature", data["url"])
+
+    def test_scopes_target_folder_to_owner(self):
+        theirs = Folder.objects.create(name="theirs", owner=self.other)
+        resp = self._presign("presign_upload", theirs.id)
+        self.assertEqual(resp.status_code, 404)
+
+    def test_requires_login(self):
+        self.client.logout()
+        resp = self._presign("presign_upload_root")
+        self.assertEqual(resp.status_code, 302)
+        self.assertIn("/accounts/login/", resp["Location"])
+
+    def test_disabled_returns_404(self):
+        with override_settings(DIRECT_UPLOAD_ENABLED=False):
+            self.assertEqual(self._presign("presign_upload_root").status_code, 404)
+
+
+@override_settings(
+    STORAGES={
+        "default": {"BACKEND": "files.tests.RemoteLikeStorage"},
+        "staticfiles": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
+    },
+    DIRECT_UPLOAD_ENABLED=True,
+)
+class CommitUploadTests(TestCase):
+    """commit_upload records a directly-uploaded file, failing closed on any
+    key it didn't mint or any object that isn't really there."""
+
+    def setUp(self):
+        RemoteLikeStorage._files = {}
+        User = get_user_model()
+        self.user = User.objects.create_user(username="owner", password="pw")
+        self.client.force_login(self.user)
+        self.key = f"user_{self.user.id}/{uuid.uuid4().hex}/clip.mp4"
+
+    def _commit(self, **fields):
+        return self.client.post(
+            reverse("commit_upload_root"),
+            fields,
+            HTTP_X_REQUESTED_WITH="XMLHttpRequest",
+        )
+
+    def test_records_document_with_size_read_from_bucket(self):
+        RemoteLikeStorage._files[self.key] = b"hello bucket"
+        # Client also sends a bogus "size"; it must be ignored in favor of the
+        # bucket's real size, and the subfolder tree rebuilt from the path.
+        resp = self._commit(key=self.key, path="Videos/clip.mp4", size="999999")
+        self.assertEqual(resp.status_code, 200)
+
+        doc = Document.objects.get()
+        self.assertEqual(doc.size, len(b"hello bucket"))
+        self.assertEqual(doc.name, "clip.mp4")
+        self.assertEqual(doc.folder.name, "Videos")
+        self.assertEqual(doc.file.name, self.key)
+
+    def test_rejects_key_outside_user_prefix(self):
+        evil = f"user_{self.user.id + 999}/{uuid.uuid4().hex}/secret"
+        RemoteLikeStorage._files[evil] = b"someone elses object"
+        resp = self._commit(key=evil, path="secret")
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(Document.objects.count(), 0)
+
+    def test_rejects_malformed_key_shape(self):
+        # Right prefix but extra path segments (count of '/' != 2) is refused.
+        bad = f"user_{self.user.id}/a/b/c"
+        RemoteLikeStorage._files[bad] = b"x"
+        resp = self._commit(key=bad, path="c")
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(Document.objects.count(), 0)
+
+    def test_fails_closed_when_object_not_uploaded(self):
+        # Well-formed key for this user, but nothing was ever PUT to the bucket.
+        resp = self._commit(key=self.key, path="clip.mp4")
+        self.assertEqual(resp.status_code, 404)
+        self.assertEqual(Document.objects.count(), 0)
+
+    def test_requires_login(self):
+        self.client.logout()
+        resp = self._commit(key=self.key, path="clip.mp4")
+        self.assertEqual(resp.status_code, 302)
+        self.assertIn("/accounts/login/", resp["Location"])
+
+    def test_disabled_returns_404(self):
+        RemoteLikeStorage._files[self.key] = b"data"
+        with override_settings(DIRECT_UPLOAD_ENABLED=False):
+            resp = self._commit(key=self.key, path="clip.mp4")
+            self.assertEqual(resp.status_code, 404)

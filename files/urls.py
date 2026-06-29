@@ -23,6 +23,11 @@ urlpatterns = [
     path("folder/<int:folder_id>/upload/chunk/", views.upload_chunk, name="upload_chunk"),
     path("upload/chunk/complete/", views.upload_chunk_complete, name="upload_chunk_complete_root"),
     path("folder/<int:folder_id>/upload/chunk/complete/", views.upload_chunk_complete, name="upload_chunk_complete"),
+    # Presigned direct-to-bucket upload (object storage only; off by default)
+    path("upload/presign/", views.presign_upload, name="presign_upload_root"),
+    path("folder/<int:folder_id>/upload/presign/", views.presign_upload, name="presign_upload"),
+    path("upload/commit/", views.commit_upload, name="commit_upload_root"),
+    path("folder/<int:folder_id>/upload/commit/", views.commit_upload, name="commit_upload"),
     path("doc/<int:doc_id>/preview/", views.preview_document, name="preview_document"),
     path("doc/<int:doc_id>/inline/", views.inline_document, name="inline_document"),
     path("doc/<int:doc_id>/download/", views.download_document, name="download_document"),

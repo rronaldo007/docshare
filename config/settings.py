@@ -131,6 +131,21 @@ MEDIA_URL = "media/"
 # when files land in object storage, so it must remain a writable local path.
 MEDIA_ROOT = os.environ.get("DJANGO_MEDIA_ROOT", BASE_DIR / "media")
 
+# Presigned direct-to-bucket uploads: the browser PUTs file bytes straight to
+# the object-storage bucket (bypassing this app AND the proxy's ~100 MB body
+# limit), then asks the app to record the file. This ONLY works with object
+# storage configured AND requires a CORS rule on the bucket allowing the app's
+# origin to PUT -- so it is OFF by default even when S3 is on. Turn it on with
+# DJANGO_DIRECT_UPLOAD=1 only after the bucket's CORS is configured and tested.
+# When off, uploads use the existing chunked/batched path unchanged. See README.
+DIRECT_UPLOAD_ENABLED = bool(_S3_BUCKET) and _env_bool("DJANGO_DIRECT_UPLOAD", False)
+# How long a presigned PUT URL stays valid (seconds). Short by design: the URL
+# is a bearer capability to write one object key for its lifetime.
+DIRECT_UPLOAD_EXPIRY = int(os.environ.get("DJANGO_DIRECT_UPLOAD_EXPIRY", 3600))
+# A single presigned PUT tops out at S3's 5 GB object limit; larger files fall
+# back to the chunked uploader client-side.
+DIRECT_UPLOAD_MAX_BYTES = 5 * 1024 * 1024 * 1024
+
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 # Auth flow

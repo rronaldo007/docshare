@@ -89,6 +89,12 @@ Other supported variables:
   provide `DJANGO_S3_ACCESS_KEY_ID`, `DJANGO_S3_SECRET_ACCESS_KEY`, and
   `DJANGO_S3_ENDPOINT_URL` (the bucket's S3 API endpoint); `DJANGO_S3_REGION`
   defaults to `auto` (fine for R2). See "Object storage" below.
+- `DJANGO_DIRECT_UPLOAD` - set to `1` to let the browser upload file bytes
+  **straight to the bucket** via presigned URLs (bypassing this app and the proxy
+  body limit entirely). Off by default, and ignored unless `DJANGO_S3_BUCKET` is
+  set. **Requires a CORS rule on the bucket** allowing your app origin to `PUT` --
+  see "Direct uploads" below. `DJANGO_DIRECT_UPLOAD_EXPIRY` (default `3600`) sets
+  the presigned-URL lifetime in seconds.
 - `GUNICORN_WORKER_CLASS` / `GUNICORN_THREADS` / `GUNICORN_TIMEOUT` - gunicorn
   serving knobs (defaults `gthread` / `4` / `120`). A folder "Download all" zip
   and large single files are streamed and can take a long time to send;
@@ -148,6 +154,43 @@ Things to know:
   staging.
 - Existing files already on disk are not moved automatically. This setup is for a
   fresh cutover; migrating old files into the bucket would be a separate one-off.
+
+### Direct uploads (optional, object storage only)
+
+With `DJANGO_DIRECT_UPLOAD=1` (and a bucket configured), the browser uploads file
+bytes **straight to the bucket** instead of through this app: it asks the app for
+a short-lived presigned `PUT` URL, PUTs the file to the bucket, then asks the app
+to record it. The bytes never transit the app server or the proxy's ~100 MB body
+limit, so even very large files upload in one shot (a single presigned PUT tops
+out at 5 GB; larger files automatically fall back to the chunked uploader).
+
+This is **off by default and safe to leave off** -- uploads keep working through
+the chunked/batched path. Before turning it on:
+
+- **The bucket needs a CORS rule** allowing your app's origin to `PUT` (and to
+  read the response). Browser-to-bucket uploads are cross-origin and fail without
+  it. A minimal rule:
+
+  ```json
+  [
+    {
+      "AllowedOrigins": ["https://your-app-origin.example"],
+      "AllowedMethods": ["PUT"],
+      "AllowedHeaders": ["*"],
+      "MaxAgeSeconds": 3600
+    }
+  ]
+  ```
+
+  Confirm your provider exposes bucket CORS config (on Cloudflare R2 it is under
+  the bucket's Settings; whether Sevalla surfaces it may need a support check).
+
+The app side stays fail-closed: the object key is minted server-side under the
+user's own `user_<id>/` prefix (a client can never presign or commit outside it),
+and the commit step refuses any key it didn't mint or any object that wasn't
+actually uploaded, reading the stored size from the bucket rather than trusting
+the client. Bytes are still delivered by streaming through the guarded views, so
+the bucket stays private.
 
 ## How sharing works
 

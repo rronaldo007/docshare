@@ -126,7 +126,7 @@
                 </li>
             {% endfor %}
 
-            {% for doc in documents %}
+            {% for doc in documents %}{% if doc.kind != 'image' %}
                 <li class="flex flex-col gap-3 px-4 py-3 hover:bg-slate-50 sm:flex-row sm:items-center sm:justify-between">
                     <a href="{% url 'preview_document' doc.id %}" class="flex items-center gap-3 min-w-0 sm:flex-1">
                         <span class="text-slate-400 text-lg">📄</span>
@@ -151,8 +151,37 @@
                         </form>
                     </div>
                 </li>
-            {% endfor %}
+            {% endif %}{% endfor %}
         </ul>
+
+        {# Image files render as a thumbnail grid. Thumbnails point at the guarded
+           inline view (never a public URL); loading=lazy keeps a folder of
+           hundreds of photos from fetching every full-size image at once. #}
+        {% if has_images %}
+        <div class="grid grid-cols-2 gap-3 p-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
+            {% for doc in documents %}{% if doc.kind == 'image' %}
+                <div class="group relative aspect-square overflow-hidden rounded-lg border border-slate-200 bg-slate-100">
+                    <a href="{% url 'preview_document' doc.id %}" class="block h-full w-full">
+                        <img src="{% url 'inline_document' doc.id %}" alt="{{ doc.name }}"
+                             loading="lazy" decoding="async"
+                             class="h-full w-full object-cover transition duration-200 group-hover:scale-105">
+                    </a>
+                    <div class="pointer-events-none absolute inset-x-0 bottom-0 flex items-end justify-between gap-2 bg-gradient-to-t from-black/60 to-transparent px-2 py-1.5 opacity-0 transition group-hover:opacity-100">
+                        <span class="truncate text-xs text-white">{{ doc.name }}</span>
+                    </div>
+                    <div class="absolute right-1.5 top-1.5 flex gap-1 opacity-0 transition group-hover:opacity-100">
+                        <a href="{% url 'download_document' doc.id %}"
+                           class="rounded bg-white/90 px-1.5 py-0.5 text-xs text-slate-700 shadow hover:bg-white">Get</a>
+                        <form method="post" action="{% url 'delete_document' doc.id %}"
+                              onsubmit="return confirm('Delete this file?');">
+                            {% csrf_token %}
+                            <button class="rounded bg-white/90 px-1.5 py-0.5 text-xs text-red-600 shadow hover:bg-white">Del</button>
+                        </form>
+                    </div>
+                </div>
+            {% endif %}{% endfor %}
+        </div>
+        {% endif %}
     {% endif %}
 </div>
 

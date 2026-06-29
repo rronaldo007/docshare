@@ -1,5 +1,7 @@
 import mimetypes
 import os
+import shutil
+import tempfile
 import time
 import uuid
 import zipfile
@@ -623,10 +625,111 @@ def delete_document(request, doc_id):
     return redirect(folder.get_absolute_url() if folder else "browse")
 
 
+ZIP_CONTENT_TYPES = {
+    "application/zip",
+    "application/x-zip",
+    "application/x-zip-compressed",
+    "multipart/x-zip",
+}
+# Largest zip we'll read server-side to list its contents. Reading the archive's
+# directory means copying it to a temp file, so cap it to keep a huge zip from
+# tying up the small instance; bigger zips stay download-only.
+ZIP_PREVIEW_MAX_BYTES = 200 * 1024 * 1024
+
+
+def _is_zip(doc):
+    name = (doc.name or doc.file.name or "").lower()
+    ct = (doc.content_type or "").split(";")[0].strip().lower()
+    return name.endswith(".zip") or ct in ZIP_CONTENT_TYPES
+
+
+def _zip_to_tempfile(doc):
+    """Copy a document's bytes to a local temp file in chunks (low memory) and
+    return the open temp file at offset 0. Caller closes it (auto-deletes)."""
+    tmp = tempfile.NamedTemporaryFile(suffix=".zip")
+    with doc.file.open("rb") as src:
+        shutil.copyfileobj(src, tmp, length=1024 * 1024)
+    tmp.flush()
+    tmp.seek(0)
+    return tmp
+
+
+def _read_zip_entries(doc):
+    """List the (non-directory) files inside a zip document, memory-safely."""
+    tmp = _zip_to_tempfile(doc)
+    try:
+        with zipfile.ZipFile(tmp) as zf:
+            return [
+                {"name": info.filename, "size": info.file_size}
+                for info in zf.infolist()
+                if not info.is_dir()
+            ]
+    finally:
+        tmp.close()
+
+
 @login_required
 def preview_document(request, doc_id):
     doc = get_object_or_404(Document, pk=doc_id, owner=request.user)
-    return render(request, "files/preview.html", {"doc": doc})
+    ctx = {"doc": doc}
+    if _is_zip(doc):
+        ctx["is_zip"] = True
+        if doc.size and doc.size > ZIP_PREVIEW_MAX_BYTES:
+            ctx["zip_too_large"] = True
+        else:
+            try:
+                ctx["zip_entries"] = _read_zip_entries(doc)
+            except Exception:
+                ctx["zip_error"] = True
+    return render(request, "files/preview.html", ctx)
+
+
+@login_required
+def zip_entry(request, doc_id):
+    """Stream one file from inside a zip document. Owner-scoped; the entry must
+    actually exist in the archive (fail closed, no path is trusted). Served with
+    the same inline allowlist as other files -- images/PDF/plain text render
+    inline, everything else (incl. HTML/SVG) is forced to download -- so an
+    entry can never execute as same-origin script."""
+    doc = get_object_or_404(Document, pk=doc_id, owner=request.user)
+    if not _is_zip(doc):
+        raise Http404
+    entry = request.GET.get("path", "")
+    if not entry:
+        raise Http404
+    tmp = _zip_to_tempfile(doc)
+    try:
+        zf = zipfile.ZipFile(tmp)
+    except Exception:
+        tmp.close()
+        raise Http404("Not a readable zip.")
+    if entry not in zf.namelist() or entry.endswith("/"):
+        zf.close()
+        tmp.close()
+        raise Http404
+
+    filename = os.path.basename(entry) or "file"
+    guessed = (mimetypes.guess_type(filename)[0] or "").lower()
+    inline = guessed in INLINE_CONTENT_TYPES
+    content_type = guessed if inline else "application/octet-stream"
+
+    def stream():
+        try:
+            with zf.open(entry) as src:
+                while True:
+                    chunk = src.read(262144)
+                    if not chunk:
+                        break
+                    yield chunk
+        finally:
+            zf.close()
+            tmp.close()
+
+    response = StreamingHttpResponse(stream(), content_type=content_type)
+    if not inline:
+        response["Content-Disposition"] = f'attachment; filename="{filename}"'
+    response["X-Content-Type-Options"] = "nosniff"
+    return response
 
 
 @login_required

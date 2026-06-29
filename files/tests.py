@@ -625,3 +625,59 @@ class BrowsePaginationTests(TestCase):
         resp = self.client.get(reverse("browse") + "?page=2")
         self.assertEqual(len(resp.context["documents"]), 5)
         self.assertFalse(resp.context["page_obj"].has_next())
+
+
+def _zip_bytes(files):
+    """A real in-memory zip of {name: bytes} for zip-preview tests."""
+    import io
+    import zipfile as zf
+    buf = io.BytesIO()
+    with zf.ZipFile(buf, "w") as z:
+        for name, data in files.items():
+            z.writestr(name, data)
+    return buf.getvalue()
+
+
+class ZipPreviewTests(TestCase):
+    """Owners can list a zip's contents and open individual entries safely."""
+
+    def setUp(self):
+        User = get_user_model()
+        self.owner = User.objects.create_user(username="owner", password="pw")
+        self.other = User.objects.create_user(username="other", password="pw")
+        body = _zip_bytes({"a.txt": b"hello", "pics/b.jpg": b"\xff\xd8\xff stub"})
+        self.doc = Document.objects.create(
+            name="bundle.zip",
+            file=SimpleUploadedFile("bundle.zip", body, content_type="application/zip"),
+            content_type="application/zip",
+            size=len(body),
+            owner=self.owner,
+        )
+
+    def test_preview_lists_entries(self):
+        self.client.login(username="owner", password="pw")
+        resp = self.client.get(reverse("preview_document", args=[self.doc.id]))
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.context["is_zip"])
+        names = {e["name"] for e in resp.context["zip_entries"]}
+        self.assertEqual(names, {"a.txt", "pics/b.jpg"})
+
+    def test_open_entry_streams_content(self):
+        self.client.login(username="owner", password="pw")
+        url = reverse("zip_entry", args=[self.doc.id]) + "?path=a.txt"
+        resp = self.client.get(url)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(b"".join(resp.streaming_content), b"hello")
+        # text is an allowlisted inline type
+        self.assertTrue(resp["Content-Type"].startswith("text/plain"))
+        self.assertEqual(resp["X-Content-Type-Options"], "nosniff")
+
+    def test_entry_not_in_zip_404s(self):
+        self.client.login(username="owner", password="pw")
+        url = reverse("zip_entry", args=[self.doc.id]) + "?path=../secret"
+        self.assertEqual(self.client.get(url).status_code, 404)
+
+    def test_zip_entry_is_owner_scoped(self):
+        self.client.login(username="other", password="pw")
+        url = reverse("zip_entry", args=[self.doc.id]) + "?path=a.txt"
+        self.assertEqual(self.client.get(url).status_code, 404)

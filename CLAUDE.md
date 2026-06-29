@@ -71,14 +71,27 @@ There is no test suite yet. If you add features, add tests under
 - **Never serve raw uploaded files.** All file bytes (owner and public) flow
   through the guarded views via `_serve_file`; the `/media/` route exists only
   under `DEBUG`. Do not add `doc.file.url` to a template or re-enable public
-  media — that bypasses every guard above.
+  media — that bypasses every guard above. This holds whether files live on the
+  local disk or in an object-storage bucket (see below): the bucket MUST stay
+  private and bytes always stream through `_serve_file`, never via a public
+  object URL or a presigned link handed out before the guards run.
+- **Storage backend is env-driven.** Files live on the local disk
+  (`FileSystemStorage`) by default; setting `DJANGO_S3_BUCKET` (+ keys/endpoint)
+  switches the default storage to a private S3-compatible bucket (Sevalla/R2)
+  with zero code change. Local dev and the test suite run on the disk with no S3.
+  Serving, previews, and the "Download all" zip already stream via
+  `doc.file.open("rb")`, so they work over either backend unchanged. The chunk
+  staging dir (`.chunks/`) always stays on local disk regardless. See README's
+  "Object storage" section.
 - **Large uploads are chunked, not single-request.** A reverse proxy (Cloudflare
   on Sevalla) caps a single request body at ~100 MB. Files over ~80 MB are
   sliced client-side and POSTed to `upload_chunk` / `upload_chunk_complete`,
   which append to a per-user staging file under `MEDIA_ROOT/.chunks/` (never
-  web-served) and `os.replace` it into final storage (no multi-GB second copy).
-  The server keeps NO state between chunk requests — the `.part` file's size is
-  the state — so it stays correct across multiple gunicorn workers. These views
+  web-served) and move it into final storage via `_store_assembled_file` (local
+  disk: `os.replace`, no multi-GB second copy; object storage: stream up, then
+  drop the local part). The server keeps NO state between chunk requests — the
+  `.part` file's size is the state — so it stays correct across multiple gunicorn
+  workers. These views
   are owner-scoped; `upload_id` must be a UUID and paths are sanitized exactly
   like `upload_folder`. Don't add chunked uploads to the anonymous path.
 - **File delivery is XSS-safe by construction.** Content-Type is re-derived

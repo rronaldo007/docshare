@@ -1,13 +1,45 @@
+import os
 import shutil
 import tempfile
 import uuid
 
 from django.contrib.auth import get_user_model
+from django.core.files.base import ContentFile
+from django.core.files.storage import Storage
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase, override_settings
 from django.urls import reverse
 
 from .models import Document, Folder, ShareLink
+
+
+class RemoteLikeStorage(Storage):
+    """Minimal dict-backed storage that mimics S3/R2: like the real backend it
+    exposes no local filesystem path(), so the chunked uploader must stream the
+    assembled file up rather than os.replace it. Bytes are shared at class level
+    so the lazy default-storage proxy and the FileField resolve to the same data."""
+
+    _files = {}
+
+    def _open(self, name, mode="rb"):
+        return ContentFile(self._files[name])
+
+    def _save(self, name, content):
+        content.seek(0)
+        self._files[name] = content.read()
+        return name
+
+    def exists(self, name):
+        return name in self._files
+
+    def delete(self, name):
+        self._files.pop(name, None)
+
+    def size(self, name):
+        return len(self._files[name])
+
+    def path(self, name):
+        raise NotImplementedError("This backend doesn't support absolute paths.")
 
 
 class ShareLinkIsolationTests(TestCase):
@@ -241,3 +273,66 @@ class ChunkedUploadTests(TestCase):
         doc = Document.objects.get()
         self.assertEqual(doc.folder, existing)  # reused, not duplicated
         self.assertEqual(Folder.objects.filter(name="Day1").count(), 1)
+
+
+# The real S3/R2 backend has no usable local path(): it raises NotImplementedError,
+# which is how the chunked uploader detects "remote" storage and streams the file
+# up instead of os.replace-ing it. Django's plain InMemoryStorage DOES return a
+# path, so it would take the local branch and not match production; subclassing to
+# raise NotImplementedError makes it a faithful, network-free stand-in for S3.
+@override_settings(
+    MEDIA_ROOT=_CHUNK_MEDIA,
+    STORAGES={
+        "default": {"BACKEND": "files.tests.RemoteLikeStorage"},
+        "staticfiles": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
+    },
+)
+class ChunkedUploadToObjectStorageTests(TestCase):
+    """Large files finalize correctly when files live in object storage."""
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(_CHUNK_MEDIA, ignore_errors=True)
+        super().tearDownClass()
+
+    def setUp(self):
+        RemoteLikeStorage._files = {}
+        User = get_user_model()
+        self.user = User.objects.create_user(username="owner", password="pw")
+        self.client.force_login(self.user)
+        self.upload_id = str(uuid.uuid4())
+
+    def _send_chunk(self, offset, body):
+        return self.client.post(
+            reverse("upload_chunk_root"),
+            {
+                "upload_id": self.upload_id,
+                "offset": offset,
+                "chunk": SimpleUploadedFile("chunk", body),
+            },
+            HTTP_X_REQUESTED_WITH="XMLHttpRequest",
+        )
+
+    def test_assembled_file_is_streamed_into_object_storage(self):
+        # Chunks stage on the local disk, then the finished file is uploaded to
+        # the (non-path) backend on complete and read back through it.
+        self.assertEqual(self._send_chunk(0, b"remote ").status_code, 200)
+        self.assertEqual(self._send_chunk(7, b"bytes").status_code, 200)
+        resp = self.client.post(
+            reverse("upload_chunk_complete_root"),
+            {"upload_id": self.upload_id, "path": "Albums/big.bin"},
+            HTTP_X_REQUESTED_WITH="XMLHttpRequest",
+        )
+        self.assertEqual(resp.status_code, 200)
+
+        doc = Document.objects.get()
+        self.assertEqual(doc.size, 12)
+        self.assertEqual(doc.folder.name, "Albums")
+        self.assertEqual(doc.file.open("rb").read(), b"remote bytes")
+
+        # The local staging .part must be gone (no orphaned second copy).
+        chunks_dir = os.path.join(_CHUNK_MEDIA, ".chunks")
+        leftover = []
+        for root, _dirs, files in os.walk(chunks_dir):
+            leftover += [f for f in files if f.endswith(".part")]
+        self.assertEqual(leftover, [])

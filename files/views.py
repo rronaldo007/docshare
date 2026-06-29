@@ -10,6 +10,7 @@ from django.contrib import messages
 from django.contrib.auth import get_user_model
 from django.contrib.auth.decorators import login_required
 from django.core.cache import cache
+from django.core.files import File
 from django.core.files.storage import default_storage
 from django.http import (
     FileResponse,
@@ -316,6 +317,31 @@ def _safe_remove(path):
         pass
 
 
+def _store_assembled_file(part_path, rel_dest):
+    """Move a finished chunk-staging file into final storage; return its name.
+
+    On local-disk storage this is an atomic rename within the same filesystem,
+    so a multi-GB upload is never copied a second time. On object storage
+    (S3/R2) there is no local destination path, so the assembled file is
+    streamed up through the storage backend and the local staging file removed.
+    The returned name is whatever the backend actually stored under (it may
+    differ from rel_dest if the backend de-duplicates), so the caller records
+    the real key on the Document.
+    """
+    try:
+        abs_dest = default_storage.path(rel_dest)
+    except NotImplementedError:
+        abs_dest = None  # remote backend: no local filesystem path
+    if abs_dest is not None:
+        os.makedirs(os.path.dirname(abs_dest), exist_ok=True)
+        os.replace(part_path, abs_dest)
+        return rel_dest
+    with open(part_path, "rb") as fh:
+        stored = default_storage.save(rel_dest, File(fh))
+    _safe_remove(part_path)
+    return stored
+
+
 # A Sevalla cron job runs as a separate process and CANNOT mount the persistent
 # disk, so it could never see these staging files. Cleanup therefore runs inside
 # the web process (which owns the disk): a throttled opportunistic sweep on the
@@ -438,14 +464,13 @@ def upload_chunk_complete(request, folder_id=None):
 
     size = os.path.getsize(part_path)
     # Build the same kind of unguessable, per-file storage path the model's
-    # upload_to would, then place the already-assembled file there with a rename
-    # (atomic, same filesystem, no multi-GB second copy). doc.name keeps the
-    # original filename for the UI; the stored path uses a sanitized basename.
+    # upload_to would, then place the already-assembled file there. On local
+    # disk this is an atomic rename (no multi-GB second copy); on object storage
+    # it streams the file up and drops the local staging copy. doc.name keeps
+    # the original filename for the UI; the stored key uses a sanitized basename.
     safe_name = get_valid_filename(filename) or "file"
     rel_dest = f"user_{request.user.id}/{uuid.uuid4().hex}/{safe_name}"
-    abs_dest = default_storage.path(rel_dest)
-    os.makedirs(os.path.dirname(abs_dest), exist_ok=True)
-    os.replace(part_path, abs_dest)
+    rel_dest = _store_assembled_file(part_path, rel_dest)
 
     doc = Document(
         owner=request.user,

@@ -83,6 +83,12 @@ Other supported variables:
 - `DJANGO_DATA_UPLOAD_MAX_NUMBER_FILES` / `DJANGO_DATA_UPLOAD_MAX_NUMBER_FIELDS`
   - raise these only if a single folder upload exceeds the defaults
   (20000 files / 50000 fields).
+- `DJANGO_S3_BUCKET` - name of an S3-compatible bucket (e.g. Sevalla/Cloudflare
+  R2) to store uploaded files in instead of the local disk. **Leave unset to keep
+  files on disk** (the default; local dev and tests need no S3). When set, also
+  provide `DJANGO_S3_ACCESS_KEY_ID`, `DJANGO_S3_SECRET_ACCESS_KEY`, and
+  `DJANGO_S3_ENDPOINT_URL` (the bucket's S3 API endpoint); `DJANGO_S3_REGION`
+  defaults to `auto` (fine for R2). See "Object storage" below.
 - `GUNICORN_WORKER_CLASS` / `GUNICORN_THREADS` / `GUNICORN_TIMEOUT` - gunicorn
   serving knobs (defaults `gthread` / `4` / `120`). A folder "Download all" zip
   and large single files are streamed and can take a long time to send;
@@ -98,9 +104,10 @@ typically rejects any single request body over ~100 MB. So a logged-in upload
 larger than ~80 MB is sliced in the browser into smaller chunks, sent one at a
 time, and reassembled server-side into the final file (smaller files and folder
 uploads still post in batches as before). This bypasses the proxy body limit, so
-single files can be arbitrarily large -- the only real ceiling is your
-**persistent disk** (each file is stored whole on disk), which you should size
-accordingly and optionally bound with `DJANGO_MAX_UPLOAD_BYTES`.
+single files can be arbitrarily large -- the only real ceiling is your storage
+(the **persistent disk** by default, or the **object-storage bucket** if you set
+one up -- see below), which you should size accordingly and optionally bound with
+`DJANGO_MAX_UPLOAD_BYTES`.
 
 An interrupted large upload leaves a staging `.part` file under
 `MEDIA_ROOT/.chunks/`. These are cleaned automatically: the app sweeps stale
@@ -113,6 +120,34 @@ here. You can also sweep manually:
 ```bash
 python manage.py cleanup_chunks --hours 24
 ```
+
+## Object storage (optional)
+
+By default uploaded files are stored on the local disk under `MEDIA_ROOT`. For a
+file-sharing app that grows, an S3-compatible **object-storage bucket** (e.g.
+Sevalla / Cloudflare R2) is usually a better backend: far cheaper per GB, free
+egress on R2, effectively unlimited capacity, and it removes the single-instance
+limit a mounted persistent disk imposes.
+
+To switch, set `DJANGO_S3_BUCKET` (plus `DJANGO_S3_ACCESS_KEY_ID`,
+`DJANGO_S3_SECRET_ACCESS_KEY`, `DJANGO_S3_ENDPOINT_URL`, and optionally
+`DJANGO_S3_REGION`). With those set, new uploads go to the bucket; with them
+unset, nothing changes and files stay on disk. No code change, no migration of
+existing rows is required for new files.
+
+Things to know:
+
+- **Keep the bucket private.** File bytes are still streamed through the app's
+  guarded views (so every share-link guard keeps applying); they are never served
+  from a public object URL. Do not make the bucket or its objects public.
+- **The chunk staging dir stays on local disk.** Large uploads still assemble in
+  `MEDIA_ROOT/.chunks/` and are streamed up to the bucket only once complete, so
+  `MEDIA_ROOT` must remain a writable local path even with a bucket configured.
+  Because staging is per-instance, keep uploads on a single instance (as the
+  persistent-disk setup already does) unless you give all instances shared
+  staging.
+- Existing files already on disk are not moved automatically. This setup is for a
+  fresh cutover; migrating old files into the bucket would be a separate one-off.
 
 ## How sharing works
 

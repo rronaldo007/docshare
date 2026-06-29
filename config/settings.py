@@ -85,14 +85,50 @@ USE_TZ = True
 STATIC_URL = "static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
 
+# Object storage (S3 / Cloudflare R2 via Sevalla) is used for uploaded files
+# when DJANGO_S3_BUCKET is set; otherwise files stay on the local disk. This
+# keeps local dev and the test suite zero-config (no boto3, no network) while a
+# production deploy points at a private, S3-compatible bucket by setting a few
+# env vars. Buckets MUST stay private: file bytes are still streamed through the
+# guarded views (files.views._serve_file), never via a public object URL, so
+# every share-link guard keeps applying. See README.
+_S3_BUCKET = os.environ.get("DJANGO_S3_BUCKET", "").strip()
+if _S3_BUCKET:
+    _default_storage = {
+        "BACKEND": "storages.backends.s3.S3Storage",
+        "OPTIONS": {
+            "bucket_name": _S3_BUCKET,
+            "access_key": os.environ.get("DJANGO_S3_ACCESS_KEY_ID", ""),
+            "secret_key": os.environ.get("DJANGO_S3_SECRET_ACCESS_KEY", ""),
+            # Sevalla/R2 give a custom endpoint; region "auto" is fine for R2.
+            "endpoint_url": os.environ.get("DJANGO_S3_ENDPOINT_URL", ""),
+            "region_name": os.environ.get("DJANGO_S3_REGION", "auto"),
+            "signature_version": "s3v4",
+            # Path-style addressing is the safe choice for custom S3-compatible
+            # endpoints (endpoint/bucket/key). R2 does not support ACLs, so do
+            # not send one; the bucket stays private by its own config.
+            "addressing_style": "path",
+            "default_acl": None,
+            # UUID-namespaced keys never collide, but never silently overwrite.
+            "file_overwrite": False,
+            # Signed URLs aren't used for delivery (we stream through Django),
+            # but keep auth on so any accidental .url() stays non-public.
+            "querystring_auth": True,
+        },
+    }
+else:
+    _default_storage = {"BACKEND": "django.core.files.storage.FileSystemStorage"}
+
 STORAGES = {
-    "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
+    "default": _default_storage,
     "staticfiles": {
         "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
     },
 }
 
 MEDIA_URL = "media/"
+# Local disk path. Still used for the chunked-upload staging dir (.chunks/) even
+# when files land in object storage, so it must remain a writable local path.
 MEDIA_ROOT = os.environ.get("DJANGO_MEDIA_ROOT", BASE_DIR / "media")
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"

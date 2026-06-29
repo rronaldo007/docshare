@@ -193,3 +193,51 @@ class ChunkedUploadTests(TestCase):
         resp = self._send_chunk(0, b"x")
         self.assertEqual(resp.status_code, 302)
         self.assertIn("/accounts/login/", resp["Location"])
+
+    def test_large_file_in_folder_rebuilds_subfolder_tree(self):
+        # A big file uploaded as part of a folder carries its relative path
+        # ("Photos/2024/clip.mp4"); the chunked-complete view must rebuild the
+        # nested folders and place the document in the deepest one, exactly like
+        # a small-file folder upload does.
+        self.assertEqual(self._send_chunk(0, b"movie ").status_code, 200)
+        self.assertEqual(self._send_chunk(6, b"bytes").status_code, 200)
+        self.assertEqual(self._complete("Photos/2024/clip.mp4").status_code, 200)
+
+        photos = Folder.objects.get(name="Photos", parent=None, owner=self.user)
+        year = Folder.objects.get(name="2024", parent=photos, owner=self.user)
+        doc = Document.objects.get()
+        self.assertEqual(doc.name, "clip.mp4")
+        self.assertEqual(doc.folder, year)
+        self.assertEqual(doc.file.open("rb").read(), b"movie bytes")
+
+    def test_large_file_uploads_into_existing_folder(self):
+        # Uploading a big file while browsing inside a folder uses the
+        # folder-scoped chunk URLs; the assembled document must nest under that
+        # parent and reuse existing subfolders rather than duplicate them.
+        parent = Folder.objects.create(name="Trip", owner=self.user)
+        existing = Folder.objects.create(name="Day1", parent=parent, owner=self.user)
+
+        self.assertEqual(
+            self.client.post(
+                reverse("upload_chunk", args=[parent.id]),
+                {
+                    "upload_id": self.upload_id,
+                    "offset": 0,
+                    "chunk": SimpleUploadedFile("chunk", b"raw"),
+                },
+                HTTP_X_REQUESTED_WITH="XMLHttpRequest",
+            ).status_code,
+            200,
+        )
+        self.assertEqual(
+            self.client.post(
+                reverse("upload_chunk_complete", args=[parent.id]),
+                {"upload_id": self.upload_id, "path": "Day1/photo.raw"},
+                HTTP_X_REQUESTED_WITH="XMLHttpRequest",
+            ).status_code,
+            200,
+        )
+
+        doc = Document.objects.get()
+        self.assertEqual(doc.folder, existing)  # reused, not duplicated
+        self.assertEqual(Folder.objects.filter(name="Day1").count(), 1)

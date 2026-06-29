@@ -37,4 +37,5 @@ urlpatterns = [
     path("share/<str:kind>/<int:obj_id>/", views.create_share, name="create_share"),
     path("links/", views.my_links, name="my_links"),
     path("links/<uuid:token>/revoke/", views.revoke_link, name="revoke_link"),
+    path("links/<uuid:token>/remove-password/", views.remove_link_password, name="remove_link_password"),
 ]

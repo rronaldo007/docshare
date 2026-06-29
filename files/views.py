@@ -133,7 +133,10 @@ def browse(request, folder_id=None):
         )
         folder.can_move_to_root = folder.parent_id is not None
 
-    documents = Document.objects.filter(owner=request.user, folder=current)
+    documents = list(Document.objects.filter(owner=request.user, folder=current))
+    # kind is a cheap property over content_type (no I/O); evaluate once so the
+    # template can both list non-image files and render an image thumbnail grid.
+    has_images = any(doc.kind == "image" for doc in documents)
 
     return render(
         request,
@@ -142,6 +145,7 @@ def browse(request, folder_id=None):
             "current": current,
             "folders": folders,
             "documents": documents,
+            "has_images": has_images,
             "folder_form": FolderForm(),
             "document_form": DocumentForm(),
             "direct_upload": settings.DIRECT_UPLOAD_ENABLED,
@@ -696,6 +700,20 @@ def revoke_link(request, token):
     link = get_object_or_404(ShareLink, token=token, created_by=request.user)
     link.delete()
     messages.success(request, "Link revoked.")
+    return redirect("my_links")
+
+
+@login_required
+def remove_link_password(request, token):
+    """Clear the password on one of the owner's links, making it public, without
+    revoking and recreating it. Owner-scoped and POST-only like revoke_link."""
+    if request.method != "POST":
+        return redirect("my_links")
+    link = get_object_or_404(ShareLink, token=token, created_by=request.user)
+    if link.requires_password:
+        link.set_password("")  # empty leaves the link public
+        link.save(update_fields=["password"])
+        messages.success(request, "Password removed; the link is now public.")
     return redirect("my_links")
 
 

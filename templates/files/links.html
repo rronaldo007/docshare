@@ -25,6 +25,11 @@
                         <div class="flex items-center gap-3 text-xs shrink-0">
                             {% if link.requires_password %}
                                 <span class="text-slate-400">Protected</span>
+                                <form method="post" action="{% url 'remove_link_password' link.token %}"
+                                      onsubmit="return confirm('Remove the password and make this link public?');">
+                                    {% csrf_token %}
+                                    <button class="text-indigo-600 hover:underline">Remove password</button>
+                                </form>
                             {% endif %}
                             {% if link.is_expired %}
                                 <span class="text-red-500">Expired</span>

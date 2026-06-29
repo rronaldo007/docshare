@@ -154,9 +154,11 @@
             {% endif %}{% endfor %}
         </ul>
 
-        {# Image files render as a thumbnail grid. Thumbnails point at the guarded
-           inline view (never a public URL); loading=lazy keeps a folder of
-           hundreds of photos from fetching every full-size image at once. #}
+        {% comment %}
+        Image files render as a thumbnail grid. Thumbnails point at the guarded
+        inline view (never a public URL); loading=lazy keeps a folder of
+        hundreds of photos from fetching every full-size image at once.
+        {% endcomment %}
         {% if has_images %}
         <div class="grid grid-cols-2 gap-3 p-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
             {% for doc in documents %}{% if doc.kind == 'image' %}

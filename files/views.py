@@ -636,6 +636,61 @@ def download_document(request, doc_id):
     return _serve_file(doc, inline=False)
 
 
+# Longest-edge size (px) for the grid thumbnails. Small enough that a folder of
+# hundreds of photos loads quickly, large enough to stay crisp on a 2x display.
+THUMBNAIL_MAX_PX = 400
+
+
+def _thumb_key(doc):
+    """Storage key for a document's cached thumbnail. Derived server-side from
+    the stored object key (never client-supplied), kept under a thumbnails/
+    prefix so it never collides with originals and stays private in the bucket."""
+    return f"thumbnails/{doc.file.name}.jpg"
+
+
+def _generate_thumbnail(doc, key):
+    """Make a small JPEG thumbnail from the original image and cache it in the
+    default storage. Uses JPEG draft mode so a large photo decodes at a reduced
+    scale -- far less memory/CPU, which matters on a small instance."""
+    from io import BytesIO
+
+    from PIL import Image, ImageOps
+
+    with doc.file.open("rb") as fh:
+        img = Image.open(fh)
+        img.draft("RGB", (THUMBNAIL_MAX_PX, THUMBNAIL_MAX_PX))
+        img = ImageOps.exif_transpose(img)  # honor camera rotation
+        img = img.convert("RGB")
+        img.thumbnail((THUMBNAIL_MAX_PX, THUMBNAIL_MAX_PX))
+        buf = BytesIO()
+        img.save(buf, format="JPEG", quality=80, optimize=True)
+    buf.seek(0)
+    default_storage.save(key, File(buf))
+
+
+@login_required
+def thumbnail_document(request, doc_id):
+    """Serve a small cached JPEG thumbnail for an image document (used by the
+    browse grid). Generated on first view and cached in the private bucket;
+    owner-scoped. Non-images and any thumbnailing failure fall back to the
+    normal guarded inline serve, so the grid degrades gracefully."""
+    doc = get_object_or_404(Document, pk=doc_id, owner=request.user)
+    if doc.kind != "image":
+        return _serve_file(doc, inline=True)
+    key = _thumb_key(doc)
+    try:
+        if not default_storage.exists(key):
+            _generate_thumbnail(doc, key)
+        response = FileResponse(
+            default_storage.open(key, "rb"), content_type="image/jpeg"
+        )
+    except Exception:
+        return _serve_file(doc, inline=True)
+    response["X-Content-Type-Options"] = "nosniff"
+    response["Cache-Control"] = "private, max-age=86400"
+    return response
+
+
 # ---------- Sharing ----------
 
 @login_required

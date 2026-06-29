@@ -471,3 +471,85 @@ class CommitUploadTests(TestCase):
         with override_settings(DIRECT_UPLOAD_ENABLED=False):
             resp = self._commit(key=self.key, path="clip.mp4")
             self.assertEqual(resp.status_code, 404)
+
+
+def _jpeg_bytes(color="red", size=(24, 24)):
+    """A real (tiny) JPEG, so Pillow can actually decode/thumbnail it in tests."""
+    from io import BytesIO
+
+    from PIL import Image
+
+    buf = BytesIO()
+    Image.new("RGB", size, color).save(buf, format="JPEG")
+    return buf.getvalue()
+
+
+class ThumbnailTests(TestCase):
+    """The browse grid's thumbnail endpoint: owner-scoped, returns a cached JPEG."""
+
+    def setUp(self):
+        User = get_user_model()
+        self.owner = User.objects.create_user(username="owner", password="pw")
+        self.other = User.objects.create_user(username="other", password="pw")
+        self.doc = Document.objects.create(
+            name="photo.jpg",
+            file=SimpleUploadedFile("photo.jpg", _jpeg_bytes(), content_type="image/jpeg"),
+            content_type="image/jpeg",
+            owner=self.owner,
+        )
+
+    def test_thumbnail_returns_jpeg_and_caches(self):
+        from files.views import _thumb_key
+
+        self.client.login(username="owner", password="pw")
+        url = reverse("thumbnail_document", args=[self.doc.id])
+        resp = self.client.get(url)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp["Content-Type"], "image/jpeg")
+        self.assertEqual(resp["X-Content-Type-Options"], "nosniff")
+        # The thumbnail was cached under its derived key, and a second request
+        # serves it again without error.
+        from django.core.files.storage import default_storage
+
+        self.assertTrue(default_storage.exists(_thumb_key(self.doc)))
+        self.assertEqual(self.client.get(url).status_code, 200)
+
+    def test_thumbnail_is_owner_scoped(self):
+        self.client.login(username="other", password="pw")
+        resp = self.client.get(reverse("thumbnail_document", args=[self.doc.id]))
+        self.assertEqual(resp.status_code, 404)
+
+
+class RemoveLinkPasswordTests(TestCase):
+    """One-click removal of a share link's password (owner-scoped, POST-only)."""
+
+    def setUp(self):
+        User = get_user_model()
+        self.owner = User.objects.create_user(username="owner", password="pw")
+        self.other = User.objects.create_user(username="other", password="pw")
+        self.folder = Folder.objects.create(name="F", owner=self.owner)
+        self.link = ShareLink.objects.create(folder=self.folder, created_by=self.owner)
+        self.link.set_password("secret")
+        self.link.save()
+
+    def test_owner_can_remove_password(self):
+        self.assertTrue(self.link.requires_password)
+        self.client.login(username="owner", password="pw")
+        resp = self.client.post(reverse("remove_link_password", args=[self.link.token]))
+        self.assertEqual(resp.status_code, 302)
+        self.link.refresh_from_db()
+        self.assertFalse(self.link.requires_password)
+
+    def test_non_owner_cannot_remove_password(self):
+        self.client.login(username="other", password="pw")
+        resp = self.client.post(reverse("remove_link_password", args=[self.link.token]))
+        self.assertEqual(resp.status_code, 404)
+        self.link.refresh_from_db()
+        self.assertTrue(self.link.requires_password)
+
+    def test_get_does_not_change_password(self):
+        self.client.login(username="owner", password="pw")
+        resp = self.client.get(reverse("remove_link_password", args=[self.link.token]))
+        self.assertEqual(resp.status_code, 302)
+        self.link.refresh_from_db()
+        self.assertTrue(self.link.requires_password)

@@ -164,7 +164,7 @@
             {% for doc in documents %}{% if doc.kind == 'image' %}
                 <div class="group relative aspect-square overflow-hidden rounded-lg border border-slate-200 bg-slate-100">
                     <a href="{% url 'preview_document' doc.id %}" class="block h-full w-full">
-                        <img src="{% url 'inline_document' doc.id %}" alt="{{ doc.name }}"
+                        <img src="{% url 'thumbnail_document' doc.id %}" alt="{{ doc.name }}"
                              loading="lazy" decoding="async"
                              class="h-full w-full object-cover transition duration-200 group-hover:scale-105">
                     </a>

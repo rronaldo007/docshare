@@ -30,6 +30,7 @@ urlpatterns = [
     path("folder/<int:folder_id>/upload/commit/", views.commit_upload, name="commit_upload"),
     path("doc/<int:doc_id>/preview/", views.preview_document, name="preview_document"),
     path("doc/<int:doc_id>/inline/", views.inline_document, name="inline_document"),
+    path("doc/<int:doc_id>/thumb/", views.thumbnail_document, name="thumbnail_document"),
     path("doc/<int:doc_id>/download/", views.download_document, name="download_document"),
     path("doc/<int:doc_id>/delete/", views.delete_document, name="delete_document"),
 

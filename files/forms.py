@@ -30,3 +30,7 @@ class ShareForm(forms.Form):
         widget=forms.PasswordInput,
         help_text="Leave blank for a public link.",
     )
+    email = forms.EmailField(
+        required=False,
+        help_text="Optionally email the link to this address.",
+    )

@@ -12,6 +12,7 @@ from django.contrib.auth.decorators import login_required
 from django.core.cache import cache
 from django.core.files import File
 from django.core.files.storage import default_storage
+from django.core.paginator import Paginator
 from django.http import (
     FileResponse,
     Http404,
@@ -98,6 +99,11 @@ def _serve_file(doc, *, inline):
 
 # ---------- Authenticated browsing ----------
 
+# Files per page in the browser. Keeps a folder of hundreds of photos to a
+# manageable page (and bounds how many thumbnails load at once).
+BROWSE_PAGE_SIZE = 25
+
+
 @login_required
 def browse(request, folder_id=None):
     current = None
@@ -133,7 +139,11 @@ def browse(request, folder_id=None):
         )
         folder.can_move_to_root = folder.parent_id is not None
 
-    documents = list(Document.objects.filter(owner=request.user, folder=current))
+    # Paginate the files so a folder of hundreds of photos loads a manageable
+    # page at a time (and only ~one page of thumbnails is ever fetched at once).
+    documents_qs = Document.objects.filter(owner=request.user, folder=current)
+    page_obj = Paginator(documents_qs, BROWSE_PAGE_SIZE).get_page(request.GET.get("page"))
+    documents = list(page_obj.object_list)
     # kind is a cheap property over content_type (no I/O); evaluate once so the
     # template can both list non-image files and render an image thumbnail grid.
     has_images = any(doc.kind == "image" for doc in documents)
@@ -145,6 +155,7 @@ def browse(request, folder_id=None):
             "current": current,
             "folders": folders,
             "documents": documents,
+            "page_obj": page_obj,
             "has_images": has_images,
             "folder_form": FolderForm(),
             "document_form": DocumentForm(),
@@ -650,14 +661,25 @@ def _thumb_key(doc):
 
 def _generate_thumbnail(doc, key):
     """Make a small JPEG thumbnail from the original image and cache it in the
-    default storage. Uses JPEG draft mode so a large photo decodes at a reduced
-    scale -- far less memory/CPU, which matters on a small instance."""
+    default storage.
+
+    Memory matters here: concurrent generations from a folder of many photos
+    were OOM-killing the worker on a small instance. So we copy the original to
+    a local temp file in chunks (never holding the whole multi-MB image in RAM),
+    then let Pillow read from disk with JPEG draft mode, which decodes at a
+    reduced scale. Peak memory per generation stays tiny."""
+    import shutil
+    import tempfile
     from io import BytesIO
 
     from PIL import Image, ImageOps
 
-    with doc.file.open("rb") as fh:
-        img = Image.open(fh)
+    with tempfile.NamedTemporaryFile(suffix=".src") as tmp:
+        with doc.file.open("rb") as src:
+            shutil.copyfileobj(src, tmp, length=1024 * 1024)
+        tmp.flush()
+        tmp.seek(0)
+        img = Image.open(tmp)
         img.draft("RGB", (THUMBNAIL_MAX_PX, THUMBNAIL_MAX_PX))
         img = ImageOps.exif_transpose(img)  # honor camera rotation
         img = img.convert("RGB")
@@ -692,6 +714,40 @@ def thumbnail_document(request, doc_id):
 
 
 # ---------- Sharing ----------
+
+def _email_share_link(request, recipient, target, link, share_url):
+    """Email a freshly created share link to the recipient. Never let a mail
+    failure break link creation -- the link already exists and its URL is shown;
+    we just report whether the email went out. Actual delivery depends on the
+    configured email backend (console by default; set DJANGO_EMAIL_* for SMTP)."""
+    from django.core.mail import send_mail
+
+    sender_name = request.user.get_username()
+    label = target.name
+    subject = f'{sender_name} shared "{label}" with you on DocShare'
+    lines = [
+        f"{sender_name} shared {label} with you on DocShare.",
+        "",
+        f"Open it here: {share_url}",
+    ]
+    if link.requires_password:
+        lines.append("\nThis link is password protected; ask the sender for the password.")
+    if link.expires_at:
+        lines.append(f"\nThe link expires on {link.expires_at:%b %d, %Y}.")
+    try:
+        send_mail(
+            subject,
+            "\n".join(lines),
+            settings.DEFAULT_FROM_EMAIL,
+            [recipient],
+            fail_silently=False,
+        )
+        messages.success(request, f"Link emailed to {recipient}.")
+    except Exception:
+        messages.warning(
+            request, f"Link created, but emailing {recipient} failed."
+        )
+
 
 @login_required
 def create_share(request, kind, obj_id):
@@ -736,6 +792,10 @@ def create_share(request, kind, obj_id):
     share_url = request.build_absolute_uri(link.get_absolute_url())
     protected = " (password protected)" if link.requires_password else ""
     messages.success(request, f"Share link created{protected}: {share_url}")
+
+    recipient = form.cleaned_data.get("email")
+    if recipient:
+        _email_share_link(request, recipient, target, link, share_url)
 
     if kind == "folder" and target.parent:
         return redirect(target.parent.get_absolute_url())

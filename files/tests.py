@@ -553,3 +553,75 @@ class RemoveLinkPasswordTests(TestCase):
         self.assertEqual(resp.status_code, 302)
         self.link.refresh_from_db()
         self.assertTrue(self.link.requires_password)
+
+
+from django.core import mail
+
+
+@override_settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend")
+class EmailShareLinkTests(TestCase):
+    """create_share emails the link when an email address is supplied."""
+
+    def setUp(self):
+        User = get_user_model()
+        self.owner = User.objects.create_user(username="owner", password="pw")
+        self.folder = Folder.objects.create(name="Trip", owner=self.owner)
+        self.client.login(username="owner", password="pw")
+
+    def test_email_sent_with_link(self):
+        mail.outbox = []
+        resp = self.client.post(
+            reverse("create_share", args=["folder", self.folder.id]),
+            {"email": "friend@example.com"},
+        )
+        self.assertEqual(resp.status_code, 302)
+        link = ShareLink.objects.get(folder=self.folder)
+        self.assertEqual(len(mail.outbox), 1)
+        msg = mail.outbox[0]
+        self.assertEqual(msg.to, ["friend@example.com"])
+        self.assertIn(str(link.token), msg.body)
+
+    def test_no_email_field_sends_nothing(self):
+        mail.outbox = []
+        resp = self.client.post(
+            reverse("create_share", args=["folder", self.folder.id]), {}
+        )
+        self.assertEqual(resp.status_code, 302)
+        self.assertEqual(len(mail.outbox), 0)
+        self.assertTrue(ShareLink.objects.filter(folder=self.folder).exists())
+
+    def test_invalid_email_does_not_create_link(self):
+        mail.outbox = []
+        resp = self.client.post(
+            reverse("create_share", args=["folder", self.folder.id]),
+            {"email": "not-an-email"},
+        )
+        self.assertEqual(resp.status_code, 302)
+        # Form-invalid path fails closed: no link, no mail.
+        self.assertFalse(ShareLink.objects.filter(folder=self.folder).exists())
+        self.assertEqual(len(mail.outbox), 0)
+
+
+class BrowsePaginationTests(TestCase):
+    """The file browser paginates documents at 25 per page."""
+
+    def setUp(self):
+        User = get_user_model()
+        self.owner = User.objects.create_user(username="owner", password="pw")
+        for i in range(30):
+            Document.objects.create(
+                name=f"f{i}.txt",
+                file=SimpleUploadedFile(f"f{i}.txt", b"x"),
+                owner=self.owner,
+            )
+        self.client.login(username="owner", password="pw")
+
+    def test_first_page_has_25(self):
+        resp = self.client.get(reverse("browse"))
+        self.assertEqual(len(resp.context["documents"]), 25)
+        self.assertTrue(resp.context["page_obj"].has_next())
+
+    def test_second_page_has_remainder(self):
+        resp = self.client.get(reverse("browse") + "?page=2")
+        self.assertEqual(len(resp.context["documents"]), 5)
+        self.assertFalse(resp.context["page_obj"].has_next())

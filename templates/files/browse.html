@@ -126,7 +126,8 @@
                             <button class="text-indigo-600 hover:underline">Share</button>
                         </form>
                         <form method="post" action="{% url 'delete_folder' folder.id %}"
-                              onsubmit="return confirm('Delete this folder and everything in it?');">
+                              data-confirm="Delete this folder and everything in it? This cannot be undone."
+                              data-confirm-title="Delete folder" data-confirm-label="Delete" data-confirm-danger>
                             {% csrf_token %}
                             <button class="text-red-500 hover:underline">Delete</button>
                         </form>
@@ -155,7 +156,8 @@
                             <button class="text-indigo-600 hover:underline">Share</button>
                         </form>
                         <form method="post" action="{% url 'delete_document' doc.id %}"
-                              onsubmit="return confirm('Delete this file?');">
+                              data-confirm="Delete this file? This cannot be undone."
+                              data-confirm-title="Delete file" data-confirm-label="Delete" data-confirm-danger>
                             {% csrf_token %}
                             <button class="text-red-500 hover:underline">Delete</button>
                         </form>
@@ -185,7 +187,8 @@
                         <a href="{% url 'download_document' doc.id %}"
                            class="rounded bg-white/90 px-1.5 py-0.5 text-xs text-slate-700 shadow hover:bg-white">Get</a>
                         <form method="post" action="{% url 'delete_document' doc.id %}"
-                              onsubmit="return confirm('Delete this file?');">
+                              data-confirm="Delete this file? This cannot be undone."
+                              data-confirm-title="Delete file" data-confirm-label="Delete" data-confirm-danger>
                             {% csrf_token %}
                             <button class="rounded bg-white/90 px-1.5 py-0.5 text-xs text-red-600 shadow hover:bg-white">Del</button>
                         </form>
@@ -263,7 +266,14 @@
         function failUpload() {
             uploading = false;
             hideOverlay();
-            alert("Upload failed. Please try again.");
+            if (window.dsAlert) {
+                window.dsAlert({
+                    title: "Upload failed",
+                    message: "Something went wrong while uploading. Please try again.",
+                });
+            } else {
+                alert("Upload failed. Please try again.");
+            }
         }
 
         // Small files post in batches bounded by file COUNT and cumulative SIZE,

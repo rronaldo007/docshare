@@ -1,3 +1,5 @@
+import hashlib
+import io
 import mimetypes
 import os
 import shutil
@@ -668,10 +670,11 @@ ZIP_CONTENT_TYPES = {
     "application/x-zip-compressed",
     "multipart/x-zip",
 }
-# Largest zip we'll read server-side to list its contents. Reading the archive's
-# directory means copying it to a temp file, so cap it to keep a huge zip from
-# tying up the small instance; bigger zips stay download-only.
-ZIP_PREVIEW_MAX_BYTES = 200 * 1024 * 1024
+ZIP_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
+# How many images to show in the zip gallery preview, and the most entries we'll
+# list (a pathological archive could have a huge directory).
+ZIP_GALLERY_COUNT = 12
+ZIP_ENTRY_LIMIT = 2000
 
 
 def _is_zip(doc):
@@ -680,29 +683,93 @@ def _is_zip(doc):
     return name.endswith(".zip") or ct in ZIP_CONTENT_TYPES
 
 
-def _zip_to_tempfile(doc):
-    """Copy a document's bytes to a local temp file in chunks (low memory) and
-    return the open temp file at offset 0. Caller closes it (auto-deletes)."""
-    tmp = tempfile.NamedTemporaryFile(suffix=".zip")
-    with doc.file.open("rb") as src:
-        shutil.copyfileobj(src, tmp, length=1024 * 1024)
-    tmp.flush()
-    tmp.seek(0)
-    return tmp
+def _is_zip_image(name):
+    return os.path.splitext(name)[1].lower() in ZIP_IMAGE_EXTS
 
 
-def _read_zip_entries(doc):
-    """List the (non-directory) files inside a zip document, memory-safely."""
-    tmp = _zip_to_tempfile(doc)
+class _S3RangeReader(io.RawIOBase):
+    """A seekable, read-only file over an S3/R2 object that fetches byte ranges
+    on demand. Lets zipfile read a huge archive's directory and pull individual
+    entries via HTTP range requests, instead of downloading the whole object."""
+
+    def __init__(self, obj, size):
+        self._obj = obj
+        self._size = size
+        self._pos = 0
+
+    def seekable(self):
+        return True
+
+    def readable(self):
+        return True
+
+    def seek(self, offset, whence=io.SEEK_SET):
+        if whence == io.SEEK_SET:
+            self._pos = offset
+        elif whence == io.SEEK_CUR:
+            self._pos += offset
+        elif whence == io.SEEK_END:
+            self._pos = self._size + offset
+        return self._pos
+
+    def tell(self):
+        return self._pos
+
+    def read(self, size=-1):
+        if self._pos >= self._size:
+            return b""
+        end = self._size - 1 if size is None or size < 0 else min(self._pos + size, self._size) - 1
+        if end < self._pos:
+            return b""
+        body = self._obj.get(Range=f"bytes={self._pos}-{end}")["Body"]
+        try:
+            data = body.read()
+        finally:
+            body.close()
+        self._pos += len(data)
+        return data
+
+
+def _open_zip(doc):
+    """Open a zip document as a ZipFile WITHOUT buffering the whole archive: for
+    S3 storage, read it through range requests; local disk is already seekable.
+    Returns (zipfile, underlying_fp); the caller closes both."""
+    storage = doc.file.storage
+    name = doc.file.name
+    bucket = getattr(storage, "bucket", None)
+    if bucket is not None:
+        size = doc.size or storage.size(name)
+        fp = _S3RangeReader(bucket.Object(name), size)
+    else:
+        fp = storage.open(name, "rb")
+    return zipfile.ZipFile(fp), fp
+
+
+def _zip_listing(doc):
+    """Return (entries, gallery_images, truncated) for a zip: a capped file list
+    plus the first few image entries to show as a gallery. Reads only the archive
+    directory, so it stays cheap even for a multi-GB zip."""
+    zf, fp = _open_zip(doc)
     try:
-        with zipfile.ZipFile(tmp) as zf:
-            return [
-                {"name": info.filename, "size": info.file_size}
-                for info in zf.infolist()
-                if not info.is_dir()
-            ]
+        entries, images, truncated = [], [], False
+        for info in zf.infolist():
+            if info.is_dir():
+                continue
+            if len(entries) >= ZIP_ENTRY_LIMIT:
+                truncated = True
+                break
+            item = {
+                "name": info.filename,
+                "size": info.file_size,
+                "is_image": _is_zip_image(info.filename),
+            }
+            entries.append(item)
+            if item["is_image"] and len(images) < ZIP_GALLERY_COUNT:
+                images.append(item)
+        return entries, images, truncated
     finally:
-        tmp.close()
+        zf.close()
+        fp.close()
 
 
 @login_required
@@ -711,38 +778,38 @@ def preview_document(request, doc_id):
     ctx = {"doc": doc}
     if _is_zip(doc):
         ctx["is_zip"] = True
-        if doc.size and doc.size > ZIP_PREVIEW_MAX_BYTES:
-            ctx["zip_too_large"] = True
-        else:
-            try:
-                ctx["zip_entries"] = _read_zip_entries(doc)
-            except Exception:
-                ctx["zip_error"] = True
+        try:
+            entries, images, truncated = _zip_listing(doc)
+            ctx["zip_entries"] = entries
+            ctx["zip_gallery"] = images
+            ctx["zip_truncated"] = truncated
+        except Exception:
+            ctx["zip_error"] = True
     return render(request, "files/preview.html", ctx)
 
 
 @login_required
 def zip_entry(request, doc_id):
-    """Stream one file from inside a zip document. Owner-scoped; the entry must
-    actually exist in the archive (fail closed, no path is trusted). Served with
-    the same inline allowlist as other files -- images/PDF/plain text render
-    inline, everything else (incl. HTML/SVG) is forced to download -- so an
-    entry can never execute as same-origin script."""
+    """Stream one file from inside a zip document. Owner-scoped; zipfile only
+    reads entries that exist in the archive (a path not in the zip raises and
+    404s -- no client path is trusted). Served with the same inline allowlist as
+    other files -- images/PDF/plain text render inline, everything else (incl.
+    HTML/SVG) is forced to download -- so an entry can never execute as
+    same-origin script. Reads only the requested entry from R2 (range requests),
+    never the whole archive."""
     doc = get_object_or_404(Document, pk=doc_id, owner=request.user)
     if not _is_zip(doc):
         raise Http404
     entry = request.GET.get("path", "")
-    if not entry:
+    if not entry or entry.endswith("/"):
         raise Http404
-    tmp = _zip_to_tempfile(doc)
     try:
-        zf = zipfile.ZipFile(tmp)
+        zf, fp = _open_zip(doc)
     except Exception:
-        tmp.close()
         raise Http404("Not a readable zip.")
-    if entry not in zf.namelist() or entry.endswith("/"):
+    if entry not in zf.namelist():
         zf.close()
-        tmp.close()
+        fp.close()
         raise Http404
 
     filename = os.path.basename(entry) or "file"
@@ -760,12 +827,70 @@ def zip_entry(request, doc_id):
                     yield chunk
         finally:
             zf.close()
-            tmp.close()
+            fp.close()
 
     response = StreamingHttpResponse(stream(), content_type=content_type)
     if not inline:
         response["Content-Disposition"] = f'attachment; filename="{filename}"'
     response["X-Content-Type-Options"] = "nosniff"
+    return response
+
+
+def _zip_thumb_key(doc, entry):
+    h = hashlib.md5(entry.encode("utf-8", "replace")).hexdigest()
+    return f"thumbnails/zip/{doc.id}/{h}.jpg"
+
+
+def _generate_zip_thumbnail(doc, entry, key):
+    """Make a small JPEG thumbnail for one image inside a zip and cache it.
+    Reads only that entry (range requests), copies it to a temp file (low
+    memory), then thumbnails with JPEG draft mode -- same memory discipline as
+    document thumbnails."""
+    from io import BytesIO
+
+    from PIL import Image, ImageOps
+
+    zf, fp = _open_zip(doc)
+    try:
+        with zf.open(entry) as src, tempfile.NamedTemporaryFile(suffix=".img") as tmp:
+            shutil.copyfileobj(src, tmp, length=1024 * 1024)
+            tmp.flush()
+            tmp.seek(0)
+            img = Image.open(tmp)
+            img.draft("RGB", (THUMBNAIL_MAX_PX, THUMBNAIL_MAX_PX))
+            img = ImageOps.exif_transpose(img)
+            img = img.convert("RGB")
+            img.thumbnail((THUMBNAIL_MAX_PX, THUMBNAIL_MAX_PX))
+            buf = BytesIO()
+            img.save(buf, format="JPEG", quality=80, optimize=True)
+    finally:
+        zf.close()
+        fp.close()
+    buf.seek(0)
+    default_storage.save(key, File(buf))
+
+
+@login_required
+def zip_thumbnail(request, doc_id):
+    """Serve a cached thumbnail for one image inside a zip (gallery preview).
+    Owner-scoped; only image entries, and zipfile only reads entries that exist
+    (a bad path raises -> 404). Reads only that entry from R2, never the whole
+    archive."""
+    doc = get_object_or_404(Document, pk=doc_id, owner=request.user)
+    if not _is_zip(doc):
+        raise Http404
+    entry = request.GET.get("path", "")
+    if not entry or not _is_zip_image(entry):
+        raise Http404
+    key = _zip_thumb_key(doc, entry)
+    try:
+        if not default_storage.exists(key):
+            _generate_zip_thumbnail(doc, entry, key)
+        response = FileResponse(default_storage.open(key, "rb"), content_type="image/jpeg")
+    except Exception:
+        raise Http404("Could not render preview.")
+    response["X-Content-Type-Options"] = "nosniff"
+    response["Cache-Control"] = "private, max-age=86400"
     return response
 
 

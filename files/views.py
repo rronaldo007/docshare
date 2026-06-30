@@ -646,10 +646,10 @@ def commit_upload(request, folder_id=None):
     *dirs, filename = parts
     folder = _get_or_create_path(request.user, parent, dirs)
 
+    # MAX_UPLOAD_BYTES guards the chunked uploader's local-disk staging only.
+    # Direct uploads stream straight to the bucket and never touch the disk, so
+    # that cap does not apply here -- size is read from the bucket for the record.
     size = default_storage.size(key)  # authoritative, from the bucket
-    if settings.MAX_UPLOAD_BYTES and size > settings.MAX_UPLOAD_BYTES:
-        default_storage.delete(key)
-        return HttpResponseBadRequest("File too large.")
 
     doc = Document(
         owner=request.user,
@@ -806,10 +806,10 @@ def multipart_complete(request, folder_id=None):
     )
 
     folder = _get_or_create_path(request.user, parent, dirs)
+    # MAX_UPLOAD_BYTES guards the chunked uploader's local-disk staging only;
+    # multipart bytes go straight to the bucket and never touch the disk, so the
+    # cap does not apply here (it would defeat the whole point of multipart).
     size = default_storage.size(key)  # authoritative, from the bucket
-    if settings.MAX_UPLOAD_BYTES and size > settings.MAX_UPLOAD_BYTES:
-        default_storage.delete(key)
-        return HttpResponseBadRequest("File too large.")
 
     doc = Document(
         owner=request.user,

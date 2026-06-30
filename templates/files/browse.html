@@ -263,17 +263,25 @@
             if (overlayText) overlayText.textContent = defaultText;
             if (sub) sub.textContent = defaultSub;
         }
-        function failUpload() {
+        function failUpload(err) {
             uploading = false;
             hideOverlay();
+            var msg = (typeof err === "string" && err)
+                ? err
+                : "Something went wrong while uploading. Please try again.";
             if (window.dsAlert) {
-                window.dsAlert({
-                    title: "Upload failed",
-                    message: "Something went wrong while uploading. Please try again.",
-                });
+                window.dsAlert({ title: "Upload failed", message: msg });
             } else {
-                alert("Upload failed. Please try again.");
+                alert("Upload failed: " + msg);
             }
+        }
+
+        // Build a human message from a failed XHR: prefer the server's short
+        // plain-text body (e.g. Django's "Bad object key."), else the status.
+        function serverError(xhr, fallback) {
+            var t = (xhr.responseText || "").trim();
+            if (t && t.length < 200 && t.charAt(0) !== "<") return t;
+            return fallback + " (HTTP " + (xhr.status || 0) + ").";
         }
 
         // Small files post in batches bounded by file COUNT and cumulative SIZE,
@@ -700,11 +708,16 @@
                             live(0);
                             resolve();
                         } else {
-                            abortAndReject();
+                            // Finalize failed -- do NOT abort: every part is already
+                            // in the bucket and finalize is safe to retry. Surface
+                            // the server's reason so the failure is diagnosable.
+                            reject(serverError(xhr, "Finalizing the upload failed"));
                         }
                     });
-                    xhr.addEventListener("error", abortAndReject);
-                    xhr.addEventListener("abort", abortAndReject);
+                    xhr.addEventListener("error", function () {
+                        reject("Network error while finalizing the upload.");
+                    });
+                    xhr.addEventListener("abort", function () { reject(); });
                     xhr.send(data);
                 }
 

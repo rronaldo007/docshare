@@ -714,3 +714,47 @@ class OwnerFolderZipTests(TestCase):
         self.client.login(username="other", password="pw")
         resp = self.client.get(reverse("download_folder_zip", args=[self.folder.id]))
         self.assertEqual(resp.status_code, 404)
+
+
+class ZipGalleryTests(TestCase):
+    """The zip preview surfaces image entries and serves per-entry thumbnails."""
+
+    def setUp(self):
+        User = get_user_model()
+        self.owner = User.objects.create_user(username="owner", password="pw")
+        self.other = User.objects.create_user(username="other", password="pw")
+        body = _zip_bytes({
+            "photo1.jpg": _jpeg_bytes("red"),
+            "sub/photo2.png": _jpeg_bytes("blue"),  # PNG ext, JPEG bytes -> Pillow still decodes
+            "notes.txt": b"hello",
+        })
+        self.doc = Document.objects.create(
+            name="album.zip",
+            file=SimpleUploadedFile("album.zip", body, content_type="application/zip"),
+            content_type="application/zip", size=len(body), owner=self.owner,
+        )
+
+    def test_gallery_lists_image_entries(self):
+        self.client.login(username="owner", password="pw")
+        resp = self.client.get(reverse("preview_document", args=[self.doc.id]))
+        self.assertEqual(resp.status_code, 200)
+        gallery = {e["name"] for e in resp.context["zip_gallery"]}
+        self.assertIn("photo1.jpg", gallery)
+        self.assertNotIn("notes.txt", gallery)
+
+    def test_zip_thumbnail_returns_jpeg(self):
+        self.client.login(username="owner", password="pw")
+        url = reverse("zip_thumbnail", args=[self.doc.id]) + "?path=photo1.jpg"
+        resp = self.client.get(url)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp["Content-Type"], "image/jpeg")
+
+    def test_zip_thumbnail_rejects_non_image(self):
+        self.client.login(username="owner", password="pw")
+        url = reverse("zip_thumbnail", args=[self.doc.id]) + "?path=notes.txt"
+        self.assertEqual(self.client.get(url).status_code, 404)
+
+    def test_zip_thumbnail_owner_scoped(self):
+        self.client.login(username="other", password="pw")
+        url = reverse("zip_thumbnail", args=[self.doc.id]) + "?path=photo1.jpg"
+        self.assertEqual(self.client.get(url).status_code, 404)

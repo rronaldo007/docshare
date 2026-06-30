@@ -17,35 +17,47 @@
     {% elif doc.kind == 'text' %}
         <iframe src="{% url 'inline_document' doc.id %}" class="w-full h-[70vh] rounded border border-slate-200 bg-slate-50"></iframe>
     {% elif is_zip %}
-        {% if zip_too_large %}
-            <div class="text-center py-12 text-slate-500 text-sm">
-                This archive is too large to list here.<br>
-                <a href="{% url 'download_document' doc.id %}" class="text-indigo-600 hover:underline">Download it instead</a>.
-            </div>
-        {% elif zip_error %}
+        {% if zip_error %}
             <div class="text-center py-12 text-slate-500 text-sm">
                 Couldn't read this archive.<br>
                 <a href="{% url 'download_document' doc.id %}" class="text-indigo-600 hover:underline">Download it instead</a>.
             </div>
-        {% elif zip_entries %}
-            <p class="text-xs text-slate-400 mb-3">{{ zip_entries|length }} file{{ zip_entries|length|pluralize }} in this archive</p>
-            <ul class="divide-y divide-slate-100">
-                {% for e in zip_entries %}
-                <li class="flex items-center justify-between gap-3 py-2">
-                    <span class="flex items-center gap-2 min-w-0">
-                        <span class="text-slate-400">📄</span>
-                        <span class="truncate text-slate-800 text-sm">{{ e.name }}</span>
-                    </span>
-                    <span class="flex items-center gap-3 text-xs shrink-0">
-                        <span class="text-slate-400">{{ e.size|filesizeformat }}</span>
-                        <a href="{% url 'zip_entry' doc.id %}?path={{ e.name|urlencode }}"
-                           target="_blank" rel="noopener" class="text-indigo-600 hover:underline">Open</a>
-                    </span>
-                </li>
-                {% endfor %}
-            </ul>
         {% else %}
-            <div class="text-center py-12 text-slate-500 text-sm">This archive is empty.</div>
+            {% if zip_gallery %}
+                <p class="text-xs text-slate-400 mb-2">Image preview</p>
+                <div class="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 mb-6">
+                    {% for e in zip_gallery %}
+                    <a href="{% url 'zip_entry' doc.id %}?path={{ e.name|urlencode }}"
+                       target="_blank" rel="noopener"
+                       class="block aspect-square overflow-hidden rounded-lg border border-slate-200 bg-slate-100">
+                        <img src="{% url 'zip_thumbnail' doc.id %}?path={{ e.name|urlencode }}" alt="{{ e.name }}"
+                             loading="lazy" decoding="async" class="h-full w-full object-cover">
+                    </a>
+                    {% endfor %}
+                </div>
+            {% endif %}
+            {% if zip_entries %}
+                <p class="text-xs text-slate-400 mb-2">
+                    {{ zip_entries|length }} file{{ zip_entries|length|pluralize }} in this archive{% if zip_truncated %} (showing the first {{ zip_entries|length }}){% endif %}
+                </p>
+                <ul class="divide-y divide-slate-100">
+                    {% for e in zip_entries %}
+                    <li class="flex items-center justify-between gap-3 py-2">
+                        <span class="flex items-center gap-2 min-w-0">
+                            <span class="text-slate-400">{% if e.is_image %}🖼{% else %}📄{% endif %}</span>
+                            <span class="truncate text-slate-800 text-sm">{{ e.name }}</span>
+                        </span>
+                        <span class="flex items-center gap-3 text-xs shrink-0">
+                            <span class="text-slate-400">{{ e.size|filesizeformat }}</span>
+                            <a href="{% url 'zip_entry' doc.id %}?path={{ e.name|urlencode }}"
+                               target="_blank" rel="noopener" class="text-indigo-600 hover:underline">Open</a>
+                        </span>
+                    </li>
+                    {% endfor %}
+                </ul>
+            {% else %}
+                <div class="text-center py-12 text-slate-500 text-sm">This archive is empty.</div>
+            {% endif %}
         {% endif %}
     {% else %}
         <div class="text-center py-12 text-slate-500 text-sm">

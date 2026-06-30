@@ -22,7 +22,6 @@ from django.http import (
     Http404,
     HttpResponse,
     HttpResponseBadRequest,
-    HttpResponseServerError,
     JsonResponse,
     StreamingHttpResponse,
 )
@@ -815,7 +814,12 @@ def multipart_complete(request, folder_id=None):
         )
     except Exception as exc:  # noqa: BLE001 -- report the real reason, don't 500 opaquely
         logger.exception("Multipart finalize failed for key %s", key)
-        return HttpResponseServerError(f"Could not finalize the upload: {exc}")
+        # Return 200 with an error flag rather than a 5xx: an edge proxy
+        # (Cloudflare) may replace a 5xx body with its own page, which would hide
+        # the real reason from the client. A 200 body always reaches the browser.
+        return JsonResponse(
+            {"ok": False, "error": f"Could not finalize the upload: {exc}"}
+        )
 
     folder = _get_or_create_path(request.user, parent, dirs)
     # MAX_UPLOAD_BYTES guards the chunked uploader's local-disk staging only;

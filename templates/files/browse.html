@@ -48,7 +48,12 @@
           {% if direct_upload %}data-direct-upload="1"
           data-presign-url="{% if current %}{% url 'presign_upload' current.id %}{% else %}{% url 'presign_upload_root' %}{% endif %}"
           data-commit-url="{% if current %}{% url 'commit_upload' current.id %}{% else %}{% url 'commit_upload_root' %}{% endif %}"
-          data-direct-max="{{ direct_upload_max }}"{% endif %}
+          data-direct-max="{{ direct_upload_max }}"
+          data-multipart-create-url="{% if current %}{% url 'multipart_create' current.id %}{% else %}{% url 'multipart_create_root' %}{% endif %}"
+          data-multipart-sign-url="{% if current %}{% url 'multipart_sign_part' current.id %}{% else %}{% url 'multipart_sign_part_root' %}{% endif %}"
+          data-multipart-complete-url="{% if current %}{% url 'multipart_complete' current.id %}{% else %}{% url 'multipart_complete_root' %}{% endif %}"
+          data-multipart-abort-url="{% if current %}{% url 'multipart_abort' current.id %}{% else %}{% url 'multipart_abort_root' %}{% endif %}"
+          data-multipart-part-size="{{ direct_upload_part_size }}"{% endif %}
           enctype="multipart/form-data" class="w-full sm:w-auto">
         {% csrf_token %}
         <input id="folder-input" type="file" webkitdirectory directory multiple class="hidden">
@@ -230,6 +235,12 @@
         var presignUrl = form.dataset.presignUrl;
         var commitUrl = form.dataset.commitUrl;
         var directMax = parseInt(form.dataset.directMax || "0", 10) || (5 * 1024 * 1024 * 1024);
+        // Multipart direct upload (for files over the single-PUT ceiling).
+        var multipartCreateUrl = form.dataset.multipartCreateUrl;
+        var multipartSignUrl = form.dataset.multipartSignUrl;
+        var multipartCompleteUrl = form.dataset.multipartCompleteUrl;
+        var multipartAbortUrl = form.dataset.multipartAbortUrl;
+        var multipartPartSize = parseInt(form.dataset.multipartPartSize || "0", 10) || (256 * 1024 * 1024);
         var csrf = form.querySelector("[name=csrfmiddlewaretoken]").value;
         var defaultText = overlayText ? overlayText.textContent.trim() : "Drop to upload";
         var defaultSub = sub ? sub.textContent : "";
@@ -313,9 +324,11 @@
                 pairs.forEach(function (p) {
                     if ((p.file.size || 0) > directMax) huge.push(p); else direct.push(p);
                 });
+                // <= 5 GB: single presigned PUT. > 5 GB: presigned multipart, so
+                // even very large files go straight to the bucket (never the disk).
                 uploadDirectSequential(direct, live, function (n) { doneBytes += n; })
                     .then(function () {
-                        return uploadBigSequential(huge, live, function (n) { doneBytes += n; });
+                        return uploadMultipartSequential(huge, live, function (n) { doneBytes += n; });
                     })
                     .then(finish)
                     .catch(failUpload);
@@ -553,6 +566,139 @@
                 }
 
                 presign();
+            });
+        }
+
+        function uploadMultipartSequential(pairs, live, commit) {
+            return new Promise(function (resolve, reject) {
+                var i = 0;
+                function nextFile() {
+                    if (i >= pairs.length) { resolve(); return; }
+                    uploadOneMultipart(pairs[i], live, commit).then(function () {
+                        i++;
+                        nextFile();
+                    }).catch(reject);
+                }
+                nextFile();
+            });
+        }
+
+        // Multipart direct-to-bucket upload for files over the single-PUT ceiling
+        // (5 GB). The app opens an R2 multipart session and mints a presigned PUT
+        // per part; the browser slices the file and PUTs each part straight to the
+        // bucket, then the app finalizes by reading the part list from the bucket.
+        // Bytes never transit the app or the proxy body limit. On any failure we
+        // ask the app to abort the session so no orphaned parts linger (and bill).
+        function uploadOneMultipart(pair, live, commit) {
+            return new Promise(function (resolve, reject) {
+                var file = pair.file;
+                var path = pair.path || file.name;
+                var key, uploadId, partSize, partCount;
+                var baseBytes = 0;  // bytes in already-completed parts of this file
+
+                function abortAndReject() {
+                    // Best-effort cleanup so R2 doesn't keep a partial upload.
+                    if (key && uploadId) {
+                        var data = new FormData();
+                        data.append("csrfmiddlewaretoken", csrf);
+                        data.append("key", key);
+                        data.append("upload_id", uploadId);
+                        var x = new XMLHttpRequest();
+                        x.open("POST", multipartAbortUrl, true);
+                        x.setRequestHeader("X-Requested-With", "XMLHttpRequest");
+                        x.send(data);
+                    }
+                    reject();
+                }
+
+                function create() {
+                    var data = new FormData();
+                    data.append("csrfmiddlewaretoken", csrf);
+                    data.append("filename", file.name);
+                    var xhr = new XMLHttpRequest();
+                    xhr.open("POST", multipartCreateUrl, true);
+                    xhr.setRequestHeader("X-Requested-With", "XMLHttpRequest");
+                    xhr.addEventListener("load", function () {
+                        if (xhr.status < 200 || xhr.status >= 300) { reject(); return; }
+                        var info;
+                        try { info = JSON.parse(xhr.responseText); } catch (_) { reject(); return; }
+                        key = info.key;
+                        uploadId = info.upload_id;
+                        partSize = info.part_size || multipartPartSize;
+                        partCount = Math.max(1, Math.ceil(file.size / partSize));
+                        sendPart(1);
+                    });
+                    xhr.addEventListener("error", reject);
+                    xhr.addEventListener("abort", reject);
+                    xhr.send(data);
+                }
+
+                // For each part: ask the app for a fresh presigned URL (so a long
+                // upload survives URL expiry), then PUT the slice straight to R2.
+                function sendPart(n) {
+                    if (n > partCount) { complete(); return; }
+                    var start = (n - 1) * partSize;
+                    var end = Math.min(start + partSize, file.size);
+                    baseBytes = start;
+
+                    var data = new FormData();
+                    data.append("csrfmiddlewaretoken", csrf);
+                    data.append("key", key);
+                    data.append("upload_id", uploadId);
+                    data.append("part_number", n);
+                    var sx = new XMLHttpRequest();
+                    sx.open("POST", multipartSignUrl, true);
+                    sx.setRequestHeader("X-Requested-With", "XMLHttpRequest");
+                    sx.addEventListener("load", function () {
+                        if (sx.status < 200 || sx.status >= 300) { abortAndReject(); return; }
+                        var info;
+                        try { info = JSON.parse(sx.responseText); } catch (_) { abortAndReject(); return; }
+                        putPart(n, info.url, start, end);
+                    });
+                    sx.addEventListener("error", abortAndReject);
+                    sx.addEventListener("abort", abortAndReject);
+                    sx.send(data);
+                }
+
+                function putPart(n, url, start, end) {
+                    var xhr = new XMLHttpRequest();
+                    xhr.open("PUT", url, true);
+                    xhr.upload.addEventListener("progress", function (e) {
+                        if (e.lengthComputable) live(baseBytes + e.loaded);
+                    });
+                    xhr.addEventListener("load", function () {
+                        if (xhr.status >= 200 && xhr.status < 300) sendPart(n + 1);
+                        else abortAndReject();
+                    });
+                    xhr.addEventListener("error", abortAndReject);
+                    xhr.addEventListener("abort", abortAndReject);
+                    xhr.send(file.slice(start, end));
+                }
+
+                function complete() {
+                    var data = new FormData();
+                    data.append("csrfmiddlewaretoken", csrf);
+                    data.append("key", key);
+                    data.append("upload_id", uploadId);
+                    data.append("path", path);
+                    var xhr = new XMLHttpRequest();
+                    xhr.open("POST", multipartCompleteUrl, true);
+                    xhr.setRequestHeader("X-Requested-With", "XMLHttpRequest");
+                    xhr.addEventListener("load", function () {
+                        if (xhr.status >= 200 && xhr.status < 300) {
+                            commit(file.size);
+                            live(0);
+                            resolve();
+                        } else {
+                            abortAndReject();
+                        }
+                    });
+                    xhr.addEventListener("error", abortAndReject);
+                    xhr.addEventListener("abort", abortAndReject);
+                    xhr.send(data);
+                }
+
+                create();
             });
         }
 

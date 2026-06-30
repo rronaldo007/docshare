@@ -28,6 +28,16 @@ urlpatterns = [
     path("folder/<int:folder_id>/upload/presign/", views.presign_upload, name="presign_upload"),
     path("upload/commit/", views.commit_upload, name="commit_upload_root"),
     path("folder/<int:folder_id>/upload/commit/", views.commit_upload, name="commit_upload"),
+    # Presigned multipart direct-to-bucket upload (object storage only; for files
+    # over the single-PUT 5 GB ceiling). Off by default with the rest of direct upload.
+    path("upload/multipart/create/", views.multipart_create, name="multipart_create_root"),
+    path("folder/<int:folder_id>/upload/multipart/create/", views.multipart_create, name="multipart_create"),
+    path("upload/multipart/sign/", views.multipart_sign_part, name="multipart_sign_part_root"),
+    path("folder/<int:folder_id>/upload/multipart/sign/", views.multipart_sign_part, name="multipart_sign_part"),
+    path("upload/multipart/complete/", views.multipart_complete, name="multipart_complete_root"),
+    path("folder/<int:folder_id>/upload/multipart/complete/", views.multipart_complete, name="multipart_complete"),
+    path("upload/multipart/abort/", views.multipart_abort, name="multipart_abort_root"),
+    path("folder/<int:folder_id>/upload/multipart/abort/", views.multipart_abort, name="multipart_abort"),
     path("doc/<int:doc_id>/preview/", views.preview_document, name="preview_document"),
     path("doc/<int:doc_id>/inline/", views.inline_document, name="inline_document"),
     path("doc/<int:doc_id>/thumb/", views.thumbnail_document, name="thumbnail_document"),

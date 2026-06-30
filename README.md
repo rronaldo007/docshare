@@ -94,7 +94,11 @@ Other supported variables:
   body limit entirely). Off by default, and ignored unless `DJANGO_S3_BUCKET` is
   set. **Requires a CORS rule on the bucket** allowing your app origin to `PUT` --
   see "Direct uploads" below. `DJANGO_DIRECT_UPLOAD_EXPIRY` (default `3600`) sets
-  the presigned-URL lifetime in seconds.
+  the presigned-URL (and per-part) lifetime in seconds.
+- `DJANGO_DIRECT_UPLOAD_PART_BYTES` - part size for the multipart direct upload
+  used when a file exceeds the 5 GB single-PUT limit (default `268435456`, i.e.
+  256 MB). S3/R2 allow at most 10,000 parts, so 256 MB covers files up to ~2.5 TB;
+  raise it for larger files. Only relevant with direct upload on.
 - `GUNICORN_WORKER_CLASS` / `GUNICORN_THREADS` / `GUNICORN_TIMEOUT` - gunicorn
   serving knobs (defaults `gthread` / `4` / `120`). A folder "Download all" zip
   and large single files are streamed and can take a long time to send;
@@ -161,8 +165,21 @@ With `DJANGO_DIRECT_UPLOAD=1` (and a bucket configured), the browser uploads fil
 bytes **straight to the bucket** instead of through this app: it asks the app for
 a short-lived presigned `PUT` URL, PUTs the file to the bucket, then asks the app
 to record it. The bytes never transit the app server or the proxy's ~100 MB body
-limit, so even very large files upload in one shot (a single presigned PUT tops
-out at 5 GB; larger files automatically fall back to the chunked uploader).
+limit, so even very large files upload in one shot.
+
+A single presigned PUT tops out at S3/R2's 5 GB object limit. **Files over 5 GB
+are uploaded with multipart**: the app opens a multipart session, hands out one
+presigned `PUT` per part, the browser slices the file and PUTs each part straight
+to the bucket, and the app finalizes by reading the part list and size **from the
+bucket** (never the client). This keeps even a 15 GB upload entirely off the app
+server and its local disk -- the binding limit becomes S3's 5 TB / 10,000 parts,
+not the box's RAM or disk. Part size is `DJANGO_DIRECT_UPLOAD_PART_BYTES`. On
+cancel or failure the browser asks the app to abort the session; also add a bucket
+**lifecycle rule to auto-abort incomplete multipart uploads** after a few days so
+an abandoned upload (closed tab) doesn't leave billable orphan parts. With direct
+upload **off**, files over 5 GB fall back to the chunked uploader, which stages
+the whole file on local disk first -- fine for a roomy disk, but it will fill a
+small one, so direct upload (multipart) is the right path for multi-GB files.
 
 This is **off by default and safe to leave off** -- uploads keep working through
 the chunked/batched path. Before turning it on:
@@ -184,6 +201,9 @@ the chunked/batched path. Before turning it on:
 
   Confirm your provider exposes bucket CORS config (on Cloudflare R2 it is under
   the bucket's Settings; whether Sevalla surfaces it may need a support check).
+  The same `PUT` rule covers multipart -- because the app reads each part's ETag
+  server-side via `ListParts` (rather than the browser reading it from the PUT
+  response), no `ExposeHeaders: ETag` entry is needed.
 
 The app side stays fail-closed: the object key is minted server-side under the
 user's own `user_<id>/` prefix (a client can never presign or commit outside it),

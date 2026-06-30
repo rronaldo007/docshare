@@ -205,6 +205,7 @@ def browse(request, folder_id=None):
             "document_form": DocumentForm(),
             "direct_upload": settings.DIRECT_UPLOAD_ENABLED,
             "direct_upload_max": settings.DIRECT_UPLOAD_MAX_BYTES,
+            "direct_upload_part_size": settings.DIRECT_UPLOAD_PART_BYTES,
         },
     )
 
@@ -562,10 +563,29 @@ def upload_chunk_complete(request, folder_id=None):
 # object that was not actually uploaded. Size is read from the bucket, never the
 # client. (Buckets stay private; delivery still streams through _serve_file.)
 
+def _s3_client():
+    """The boto3 S3 client behind the default (object-storage) backend."""
+    return default_storage.connection.meta.client
+
+
+def _owned_object_key(user, key):
+    """Validate a client-supplied object key is one we minted for this user.
+
+    Returns the cleaned key, or None if it doesn't match the exact
+    user_{id}/{hex}/{name} shape under the user's own prefix. Used to fail closed
+    on any commit/multipart call: a client can never act on a key it didn't get
+    from a server-minted presign for its own account.
+    """
+    key = (key or "").strip()
+    prefix = f"user_{user.id}/"
+    if not key.startswith(prefix) or ".." in key or key.count("/") != 2:
+        return None
+    return key
+
+
 def _presigned_put_url(key):
     """Short-lived presigned S3/R2 PUT URL for one server-chosen object key."""
-    client = default_storage.connection.meta.client
-    return client.generate_presigned_url(
+    return _s3_client().generate_presigned_url(
         "put_object",
         Params={"Bucket": default_storage.bucket_name, "Key": key},
         ExpiresIn=settings.DIRECT_UPLOAD_EXPIRY,
@@ -613,9 +633,8 @@ def commit_upload(request, folder_id=None):
     # The key was minted by presign_upload as user_{id}/{hex}/{name}: exactly two
     # slashes, this user's prefix, no traversal. Reject anything else so a client
     # cannot claim another user's object or an arbitrary key.
-    key = (request.POST.get("key") or "").strip()
-    prefix = f"user_{request.user.id}/"
-    if not key.startswith(prefix) or ".." in key or key.count("/") != 2:
+    key = _owned_object_key(request.user, request.POST.get("key"))
+    if key is None:
         return HttpResponseBadRequest("Bad object key.")
     if not default_storage.exists(key):
         raise Http404  # nothing was actually uploaded under this key
@@ -646,6 +665,183 @@ def commit_upload(request, folder_id=None):
         return JsonResponse({"ok": True, "name": filename})
     messages.success(request, f"Uploaded '{filename}'.")
     return redirect(parent.get_absolute_url() if parent else "browse")
+
+
+# ---------- Presigned multipart direct upload (object storage, > 5 GB) ----------
+#
+# A single PUT caps at 5 GB; for larger files the browser uploads the object to
+# the bucket in parts via S3/R2 multipart. The app only brokers the session: it
+# mints the key (server-side, under the user's prefix), hands out one short-lived
+# presigned PUT per part, and finalizes by reading the authoritative part list
+# AND size from the bucket -- never from the client. No file bytes transit the
+# app or the local disk, so file size is decoupled from the box's RAM/disk. The
+# server keeps NO state between calls: the client carries (key, upload_id) and we
+# re-validate the key on every endpoint, so it stays correct across workers. All
+# four endpoints are @login_required and 404 when the flag is off.
+
+# S3/R2 allow at most 10,000 parts per multipart upload.
+MULTIPART_MAX_PARTS = 10000
+
+
+@login_required
+def multipart_create(request, folder_id=None):
+    """Open a multipart upload: mint the object key and return its R2 UploadId."""
+    if not settings.DIRECT_UPLOAD_ENABLED:
+        raise Http404
+    if request.method != "POST":
+        return HttpResponseBadRequest("POST required.")
+    if folder_id is not None:
+        get_object_or_404(Folder, pk=folder_id, owner=request.user)
+
+    raw = (request.POST.get("filename") or "").replace("\\", "/")
+    safe_name = get_valid_filename(os.path.basename(raw)) or "file"
+    key = f"user_{request.user.id}/{uuid.uuid4().hex}/{safe_name}"
+    resp = _s3_client().create_multipart_upload(
+        Bucket=default_storage.bucket_name, Key=key
+    )
+    return JsonResponse(
+        {
+            "key": key,
+            "upload_id": resp["UploadId"],
+            "part_size": settings.DIRECT_UPLOAD_PART_BYTES,
+        }
+    )
+
+
+@login_required
+def multipart_sign_part(request, folder_id=None):
+    """Return a presigned PUT URL for one part of an in-progress upload.
+
+    Signed per part (not all upfront) so a long upload survives URL expiry: the
+    client requests a fresh URL right before sending each part. The key is
+    re-validated against the caller's prefix so a client cannot sign a write to
+    another user's object.
+    """
+    if not settings.DIRECT_UPLOAD_ENABLED:
+        raise Http404
+    if request.method != "POST":
+        return HttpResponseBadRequest("POST required.")
+    key = _owned_object_key(request.user, request.POST.get("key"))
+    upload_id = (request.POST.get("upload_id") or "").strip()
+    if key is None or not upload_id:
+        return HttpResponseBadRequest("Bad multipart request.")
+    try:
+        part_number = int(request.POST.get("part_number"))
+    except (TypeError, ValueError):
+        return HttpResponseBadRequest("Bad part number.")
+    if not 1 <= part_number <= MULTIPART_MAX_PARTS:
+        return HttpResponseBadRequest("Bad part number.")
+
+    url = _s3_client().generate_presigned_url(
+        "upload_part",
+        Params={
+            "Bucket": default_storage.bucket_name,
+            "Key": key,
+            "UploadId": upload_id,
+            "PartNumber": part_number,
+        },
+        ExpiresIn=settings.DIRECT_UPLOAD_EXPIRY,
+    )
+    return JsonResponse({"url": url})
+
+
+@login_required
+def multipart_complete(request, folder_id=None):
+    """Finalize a multipart upload and record the Document.
+
+    Fails closed: the key MUST be one we minted for this user, and the part list
+    and size are read from the bucket (never trusted from the client). Rebuilds
+    the subfolder tree from path exactly like commit_upload / chunk-complete.
+    """
+    if not settings.DIRECT_UPLOAD_ENABLED:
+        raise Http404
+    if request.method != "POST":
+        return HttpResponseBadRequest("POST required.")
+    parent = None
+    if folder_id is not None:
+        parent = get_object_or_404(Folder, pk=folder_id, owner=request.user)
+
+    key = _owned_object_key(request.user, request.POST.get("key"))
+    upload_id = (request.POST.get("upload_id") or "").strip()
+    if key is None or not upload_id:
+        return HttpResponseBadRequest("Bad multipart request.")
+
+    rel = (request.POST.get("path") or "").replace("\\", "/")
+    parts = [p for p in rel.split("/") if p not in ("", ".", "..")]
+    if not parts:
+        return HttpResponseBadRequest("Missing filename.")
+    *dirs, filename = parts
+
+    client = _s3_client()
+    bucket = default_storage.bucket_name
+
+    # Read the parts R2 actually received -- we never trust a client part list.
+    # list_parts pages at 1000 entries, so follow the truncation marker.
+    part_items = []
+    marker = None
+    while True:
+        kwargs = {"Bucket": bucket, "Key": key, "UploadId": upload_id}
+        if marker is not None:
+            kwargs["PartNumberMarker"] = marker
+        listed = client.list_parts(**kwargs)
+        part_items.extend(listed.get("Parts", []))
+        if not listed.get("IsTruncated"):
+            break
+        marker = listed["NextPartNumberMarker"]
+
+    if not part_items:
+        client.abort_multipart_upload(Bucket=bucket, Key=key, UploadId=upload_id)
+        return HttpResponseBadRequest("No parts uploaded.")
+
+    client.complete_multipart_upload(
+        Bucket=bucket,
+        Key=key,
+        UploadId=upload_id,
+        MultipartUpload={
+            "Parts": [
+                {"PartNumber": p["PartNumber"], "ETag": p["ETag"]}
+                for p in part_items
+            ]
+        },
+    )
+
+    folder = _get_or_create_path(request.user, parent, dirs)
+    size = default_storage.size(key)  # authoritative, from the bucket
+    if settings.MAX_UPLOAD_BYTES and size > settings.MAX_UPLOAD_BYTES:
+        default_storage.delete(key)
+        return HttpResponseBadRequest("File too large.")
+
+    doc = Document(
+        owner=request.user,
+        folder=folder,
+        name=filename,
+        size=size,
+        content_type=_safe_content_type(filename=filename),
+    )
+    doc.file.name = key
+    doc.save()
+
+    if request.headers.get("x-requested-with") == "XMLHttpRequest":
+        return JsonResponse({"ok": True, "name": filename})
+    messages.success(request, f"Uploaded '{filename}'.")
+    return redirect(parent.get_absolute_url() if parent else "browse")
+
+
+@login_required
+def multipart_abort(request, folder_id=None):
+    """Abort an in-progress multipart upload so R2 keeps no orphaned parts."""
+    if not settings.DIRECT_UPLOAD_ENABLED:
+        raise Http404
+    if request.method != "POST":
+        return HttpResponseBadRequest("POST required.")
+    key = _owned_object_key(request.user, request.POST.get("key"))
+    upload_id = (request.POST.get("upload_id") or "").strip()
+    if key is None or not upload_id:
+        return HttpResponseBadRequest("Bad multipart request.")
+    _s3_client().abort_multipart_upload(
+        Bucket=default_storage.bucket_name, Key=key, UploadId=upload_id
+    )
+    return JsonResponse({"ok": True})
 
 
 @login_required

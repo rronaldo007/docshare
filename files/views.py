@@ -1304,3 +1304,23 @@ def share_download_all(request, token):
     )
     response["Content-Disposition"] = f'attachment; filename="{name}.zip"'
     return response
+
+
+@login_required
+def download_folder_zip(request, folder_id):
+    """Stream one of the owner's own folders (and its subfolders) as a single
+    zip, built on the fly in constant memory -- so you can grab a whole folder
+    of files without pre-zipping and re-uploading. Owner-scoped, same streaming
+    engine as the public 'Download all'."""
+    folder = get_object_or_404(Folder, pk=folder_id, owner=request.user)
+    docs = _descendant_documents(folder)
+    if not docs:
+        messages.error(request, "This folder has no files to download.")
+        return redirect(folder.get_absolute_url())
+
+    name = (folder.name or "folder").replace('"', "").replace("\\", "")
+    response = StreamingHttpResponse(
+        _zip_stream(docs), content_type="application/zip"
+    )
+    response["Content-Disposition"] = f'attachment; filename="{name}.zip"'
+    return response

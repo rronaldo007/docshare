@@ -681,3 +681,36 @@ class ZipPreviewTests(TestCase):
         self.client.login(username="other", password="pw")
         url = reverse("zip_entry", args=[self.doc.id]) + "?path=a.txt"
         self.assertEqual(self.client.get(url).status_code, 404)
+
+
+class OwnerFolderZipTests(TestCase):
+    """Owners can stream one of their own folders as a single zip."""
+
+    def setUp(self):
+        User = get_user_model()
+        self.owner = User.objects.create_user(username="owner", password="pw")
+        self.other = User.objects.create_user(username="other", password="pw")
+        self.folder = Folder.objects.create(name="Album", owner=self.owner)
+        sub = Folder.objects.create(name="Sub", owner=self.owner, parent=self.folder)
+        Document.objects.create(
+            name="a.txt", file=SimpleUploadedFile("a.txt", b"aaa"),
+            folder=self.folder, owner=self.owner,
+        )
+        Document.objects.create(
+            name="b.txt", file=SimpleUploadedFile("b.txt", b"bbb"),
+            folder=sub, owner=self.owner,
+        )
+
+    def test_owner_downloads_folder_zip(self):
+        self.client.login(username="owner", password="pw")
+        resp = self.client.get(reverse("download_folder_zip", args=[self.folder.id]))
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp["Content-Type"], "application/zip")
+        self.assertIn("Album.zip", resp["Content-Disposition"])
+        body = b"".join(resp.streaming_content)
+        self.assertTrue(body.startswith(b"PK"))  # valid zip
+
+    def test_folder_zip_is_owner_scoped(self):
+        self.client.login(username="other", password="pw")
+        resp = self.client.get(reverse("download_folder_zip", args=[self.folder.id]))
+        self.assertEqual(resp.status_code, 404)

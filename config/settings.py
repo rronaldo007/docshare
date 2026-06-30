@@ -105,6 +105,21 @@ if _S3_BUCKET:
     # built; settings import happens well before that.
     os.environ.setdefault("AWS_REQUEST_CHECKSUM_CALCULATION", "when_required")
     os.environ.setdefault("AWS_RESPONSE_CHECKSUM_VALIDATION", "when_required")
+    # Belt-and-suspenders: also pin the checksum behaviour directly on the boto3
+    # client config, so it applies regardless of when the env vars are read. We
+    # pass a full client_config, which means django-storages stops deriving the
+    # client config from the individual signature_version/addressing_style
+    # options below -- so those MUST be repeated here (s3v4 + path-style are
+    # required for R2). request/response_checksum_calculation="when_required"
+    # restores pre-botocore-1.36 behaviour that R2's multipart finalize needs.
+    from botocore.config import Config as _BotoConfig
+
+    _r2_client_config = _BotoConfig(
+        signature_version="s3v4",
+        s3={"addressing_style": "path"},
+        request_checksum_calculation="when_required",
+        response_checksum_validation="when_required",
+    )
     _default_storage = {
         "BACKEND": "storages.backends.s3.S3Storage",
         "OPTIONS": {
@@ -119,6 +134,10 @@ if _S3_BUCKET:
             # endpoints (endpoint/bucket/key). R2 does not support ACLs, so do
             # not send one; the bucket stays private by its own config.
             "addressing_style": "path",
+            # Authoritative client config (carries the checksum fix + the s3v4 /
+            # path-style settings, since providing this overrides the individual
+            # signature_version/addressing_style options above).
+            "client_config": _r2_client_config,
             "default_acl": None,
             # UUID-namespaced keys never collide, but never silently overwrite.
             "file_overwrite": False,

@@ -95,6 +95,16 @@ STATIC_ROOT = BASE_DIR / "staticfiles"
 # every share-link guard keeps applying. See README.
 _S3_BUCKET = os.environ.get("DJANGO_S3_BUCKET", "").strip()
 if _S3_BUCKET:
+    # botocore >= 1.36 defaults to adding data-integrity checksums (CRC32) to
+    # uploads and validating them on responses. Cloudflare R2 (and several other
+    # S3-compatible stores) do not handle these the way the SDK now expects,
+    # which breaks CompleteMultipartUpload (HTTP 500 at the finalize step) and
+    # can affect plain PUTs too. Restore the pre-1.36 behaviour -- checksums only
+    # when the API actually requires them. setdefault so a real AWS deployment
+    # can still opt back in via the env. Must run before any boto3 client is
+    # built; settings import happens well before that.
+    os.environ.setdefault("AWS_REQUEST_CHECKSUM_CALCULATION", "when_required")
+    os.environ.setdefault("AWS_RESPONSE_CHECKSUM_VALIDATION", "when_required")
     _default_storage = {
         "BACKEND": "storages.backends.s3.S3Storage",
         "OPTIONS": {

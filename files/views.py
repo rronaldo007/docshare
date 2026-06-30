@@ -22,6 +22,7 @@ from django.http import (
     Http404,
     HttpResponse,
     HttpResponseBadRequest,
+    HttpResponseServerError,
     JsonResponse,
     StreamingHttpResponse,
 )
@@ -31,9 +32,13 @@ from django.utils.text import get_valid_filename
 
 from django.core.exceptions import PermissionDenied
 
+import logging
+
 from .forms import DocumentForm, EmailSettingsForm, FolderForm, ShareForm
 from .models import Document, EmailSettings, Folder, ShareLink
 from .permissions import is_admin
+
+logger = logging.getLogger(__name__)
 
 
 # Content types we are willing to serve INLINE (rendered in the browser at our
@@ -775,35 +780,42 @@ def multipart_complete(request, folder_id=None):
     client = _s3_client()
     bucket = default_storage.bucket_name
 
-    # Read the parts R2 actually received -- we never trust a client part list.
-    # list_parts pages at 1000 entries, so follow the truncation marker.
-    part_items = []
-    marker = None
-    while True:
-        kwargs = {"Bucket": bucket, "Key": key, "UploadId": upload_id}
-        if marker is not None:
-            kwargs["PartNumberMarker"] = marker
-        listed = client.list_parts(**kwargs)
-        part_items.extend(listed.get("Parts", []))
-        if not listed.get("IsTruncated"):
-            break
-        marker = listed["NextPartNumberMarker"]
+    # The object-store calls can fail for reasons outside our control (R2 quirks,
+    # transient errors). Surface a concise reason to the client and log the full
+    # traceback rather than returning an opaque 500, so finalize is diagnosable.
+    try:
+        # Read the parts R2 actually received -- we never trust a client part
+        # list. list_parts pages at 1000 entries, so follow the truncation marker.
+        part_items = []
+        marker = None
+        while True:
+            kwargs = {"Bucket": bucket, "Key": key, "UploadId": upload_id}
+            if marker is not None:
+                kwargs["PartNumberMarker"] = marker
+            listed = client.list_parts(**kwargs)
+            part_items.extend(listed.get("Parts", []))
+            if not listed.get("IsTruncated"):
+                break
+            marker = listed["NextPartNumberMarker"]
 
-    if not part_items:
-        client.abort_multipart_upload(Bucket=bucket, Key=key, UploadId=upload_id)
-        return HttpResponseBadRequest("No parts uploaded.")
+        if not part_items:
+            client.abort_multipart_upload(Bucket=bucket, Key=key, UploadId=upload_id)
+            return HttpResponseBadRequest("No parts uploaded.")
 
-    client.complete_multipart_upload(
-        Bucket=bucket,
-        Key=key,
-        UploadId=upload_id,
-        MultipartUpload={
-            "Parts": [
-                {"PartNumber": p["PartNumber"], "ETag": p["ETag"]}
-                for p in part_items
-            ]
-        },
-    )
+        client.complete_multipart_upload(
+            Bucket=bucket,
+            Key=key,
+            UploadId=upload_id,
+            MultipartUpload={
+                "Parts": [
+                    {"PartNumber": p["PartNumber"], "ETag": p["ETag"]}
+                    for p in part_items
+                ]
+            },
+        )
+    except Exception as exc:  # noqa: BLE001 -- report the real reason, don't 500 opaquely
+        logger.exception("Multipart finalize failed for key %s", key)
+        return HttpResponseServerError(f"Could not finalize the upload: {exc}")
 
     folder = _get_or_create_path(request.user, parent, dirs)
     # MAX_UPLOAD_BYTES guards the chunked uploader's local-disk staging only;

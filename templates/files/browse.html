@@ -703,14 +703,21 @@
                     xhr.open("POST", multipartCompleteUrl, true);
                     xhr.setRequestHeader("X-Requested-With", "XMLHttpRequest");
                     xhr.addEventListener("load", function () {
+                        // Finalize failures do NOT abort: every part is already in
+                        // the bucket and finalize is safe to retry. The server
+                        // reports finalize errors as a 200 with {ok:false,error}
+                        // (so a proxy can't swallow them); also handle non-2xx.
                         if (xhr.status >= 200 && xhr.status < 300) {
-                            commit(file.size);
-                            live(0);
-                            resolve();
+                            var info = null;
+                            try { info = JSON.parse(xhr.responseText); } catch (_) {}
+                            if (info && info.ok === false) {
+                                reject(info.error || "Finalizing the upload failed.");
+                            } else {
+                                commit(file.size);
+                                live(0);
+                                resolve();
+                            }
                         } else {
-                            // Finalize failed -- do NOT abort: every part is already
-                            // in the bucket and finalize is safe to retry. Surface
-                            // the server's reason so the failure is diagnosable.
                             reject(serverError(xhr, "Finalizing the upload failed"));
                         }
                     });

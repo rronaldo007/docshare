@@ -758,3 +758,54 @@ class ZipGalleryTests(TestCase):
         self.client.login(username="other", password="pw")
         url = reverse("zip_thumbnail", args=[self.doc.id]) + "?path=photo1.jpg"
         self.assertEqual(self.client.get(url).status_code, 404)
+
+
+from files.models import EmailSettings
+
+
+@override_settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend")
+class EmailSettingsUITests(TestCase):
+    def setUp(self):
+        User = get_user_model()
+        self.staff = User.objects.create_user(username="staff", password="pw", is_staff=True, email="staff@example.com")
+        self.plain = User.objects.create_user(username="plain", password="pw")
+
+    def test_non_staff_forbidden(self):
+        self.client.login(username="plain", password="pw")
+        self.assertEqual(self.client.get(reverse("email_settings")).status_code, 403)
+
+    def test_staff_can_open_and_save(self):
+        self.client.login(username="staff", password="pw")
+        self.assertEqual(self.client.get(reverse("email_settings")).status_code, 200)
+        resp = self.client.post(reverse("email_settings"), {
+            "enabled": "on", "host": "smtp.gmail.com", "port": "587",
+            "username": "me@gmail.com", "password": "apppassword1234",
+            "use_tls": "on", "from_email": "me@gmail.com",
+        })
+        self.assertEqual(resp.status_code, 302)
+        cfg = EmailSettings.load()
+        self.assertTrue(cfg.enabled)
+        self.assertEqual(cfg.host, "smtp.gmail.com")
+        self.assertEqual(cfg.password, "apppassword1234")
+
+    def test_blank_password_keeps_existing(self):
+        EmailSettings.objects.create(pk=1, host="smtp.gmail.com", password="secret123", username="me@gmail.com")
+        self.client.login(username="staff", password="pw")
+        self.client.post(reverse("email_settings"), {
+            "enabled": "", "host": "smtp.gmail.com", "port": "587",
+            "username": "me@gmail.com", "password": "", "use_tls": "on", "from_email": "",
+        })
+        self.assertEqual(EmailSettings.load().password, "secret123")
+
+    def test_send_test_email(self):
+        from django.core import mail
+        mail.outbox = []
+        self.client.login(username="staff", password="pw")
+        resp = self.client.post(reverse("send_test_email"), {"to": "dest@example.com"})
+        self.assertEqual(resp.status_code, 302)
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(mail.outbox[0].to, ["dest@example.com"])
+
+    def test_test_email_non_staff_forbidden(self):
+        self.client.login(username="plain", password="pw")
+        self.assertEqual(self.client.post(reverse("send_test_email"), {"to": "x@y.com"}).status_code, 403)

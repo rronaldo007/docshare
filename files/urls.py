@@ -39,6 +39,8 @@ urlpatterns = [
 
     # Sharing (owner side)
     path("share/<str:kind>/<int:obj_id>/", views.create_share, name="create_share"),
+    path("settings/email/", views.email_settings, name="email_settings"),
+    path("settings/email/test/", views.send_test_email, name="send_test_email"),
     path("links/", views.my_links, name="my_links"),
     path("links/<uuid:token>/revoke/", views.revoke_link, name="revoke_link"),
     path("links/<uuid:token>/remove-password/", views.remove_link_password, name="remove_link_password"),

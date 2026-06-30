@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block title %}Email settings - DocShare{% endblock %}
+{% block content %}
+<div class="max-w-2xl">
+    <h1 class="text-lg font-semibold text-slate-900 mb-1">Email settings</h1>
+    <p class="text-sm text-slate-500 mb-4">
+        Configure an SMTP server so DocShare can email share links. For Gmail, use
+        <span class="font-medium">smtp.gmail.com</span>, port <span class="font-medium">587</span>,
+        TLS on, your Gmail address, and a 16-character
+        <a href="https://myaccount.google.com/apppasswords" target="_blank" rel="noopener"
+           class="text-indigo-600 hover:underline">App Password</a> (not your normal password).
+    </p>
+
+    <div class="bg-white border border-slate-200 rounded-lg p-5">
+        <form method="post" class="space-y-4">
+            {% csrf_token %}
+            <label class="flex items-center gap-2 text-sm text-slate-800">
+                {{ form.enabled }} <span>Enable sending through this SMTP server</span>
+            </label>
+
+            <div>
+                <label class="block text-sm text-slate-700 mb-1">SMTP host</label>
+                {{ form.host }}
+            </div>
+            <div class="flex gap-4">
+                <div class="w-32">
+                    <label class="block text-sm text-slate-700 mb-1">Port</label>
+                    {{ form.port }}
+                </div>
+                <label class="flex items-center gap-2 text-sm text-slate-800 mt-7">
+                    {{ form.use_tls }} <span>Use TLS</span>
+                </label>
+            </div>
+            <div>
+                <label class="block text-sm text-slate-700 mb-1">Username</label>
+                {{ form.username }}
+            </div>
+            <div>
+                <label class="block text-sm text-slate-700 mb-1">Password / App Password</label>
+                {{ form.password }}
+                <p class="text-xs text-slate-400 mt-1">{{ form.password.help_text }}</p>
+            </div>
+            <div>
+                <label class="block text-sm text-slate-700 mb-1">From address</label>
+                {{ form.from_email }}
+            </div>
+
+            {% if form.errors %}
+                <p class="text-sm text-red-600">Please check the fields above.</p>
+            {% endif %}
+
+            <div class="flex items-center gap-3 pt-2">
+                <button class="bg-indigo-600 text-white px-4 py-2 rounded-md text-sm hover:bg-indigo-700">Save settings</button>
+                <span class="text-xs text-slate-400">
+                    {% if cfg.enabled %}Sending is ON{% else %}Sending is OFF (links won't email until enabled){% endif %}
+                </span>
+            </div>
+        </form>
+    </div>
+
+    <div class="bg-white border border-slate-200 rounded-lg p-5 mt-4">
+        <h2 class="text-sm font-semibold text-slate-900 mb-2">Send a test email</h2>
+        <form method="post" action="{% url 'send_test_email' %}" class="flex flex-wrap items-center gap-2">
+            {% csrf_token %}
+            <input type="email" name="to" placeholder="you@example.com"
+                   class="flex-1 min-w-48 border border-slate-200 rounded px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-indigo-400">
+            <button class="border border-slate-200 px-4 py-2 rounded-md text-sm text-indigo-600 hover:bg-slate-50">Send test</button>
+        </form>
+        <p class="text-xs text-slate-400 mt-2">Save your settings first. Uses the SMTP server above when enabled.</p>
+    </div>
+</div>
+{% endblock %}

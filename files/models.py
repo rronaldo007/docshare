@@ -172,3 +172,33 @@ class ShareLink(models.Model):
 
     def get_absolute_url(self):
         return reverse("share_view", args=[self.token])
+
+
+class EmailSettings(models.Model):
+    """App-wide outgoing-email (SMTP) config, editable from the UI instead of
+    env vars. Singleton row (always pk=1)."""
+
+    host = models.CharField(max_length=255, blank=True, default="")
+    port = models.PositiveIntegerField(default=587)
+    username = models.CharField(max_length=255, blank=True, default="")
+    password = models.CharField(max_length=255, blank=True, default="")
+    use_tls = models.BooleanField(default=True)
+    from_email = models.EmailField(blank=True, default="")
+    enabled = models.BooleanField(default=False)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Email settings"
+        verbose_name_plural = "Email settings"
+
+    def __str__(self):
+        return "Email settings"
+
+    def save(self, *args, **kwargs):
+        self.pk = 1  # enforce singleton
+        super().save(*args, **kwargs)
+
+    @classmethod
+    def load(cls):
+        obj, _ = cls.objects.get_or_create(pk=1)
+        return obj

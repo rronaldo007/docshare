@@ -29,8 +29,10 @@ from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
 from django.utils.text import get_valid_filename
 
-from .forms import DocumentForm, FolderForm, ShareForm
-from .models import Document, Folder, ShareLink
+from django.core.exceptions import PermissionDenied
+
+from .forms import DocumentForm, EmailSettingsForm, FolderForm, ShareForm
+from .models import Document, EmailSettings, Folder, ShareLink
 
 
 # Content types we are willing to serve INLINE (rendered in the browser at our
@@ -980,13 +982,42 @@ def thumbnail_document(request, doc_id):
 
 # ---------- Sharing ----------
 
+def _email_connection_and_from():
+    """Build an SMTP connection + From address from the UI-configured EmailSettings
+    when it's enabled; otherwise return (None, default) so the app's configured
+    backend (console by default, or DJANGO_EMAIL_* env SMTP) is used."""
+    from django.core.mail import get_connection
+
+    cfg = EmailSettings.load()
+    if cfg.enabled and cfg.host:
+        conn = get_connection(
+            backend="django.core.mail.backends.smtp.EmailBackend",
+            host=cfg.host,
+            port=cfg.port,
+            username=cfg.username,
+            password=cfg.password,
+            use_tls=cfg.use_tls,
+        )
+        from_email = cfg.from_email or cfg.username or settings.DEFAULT_FROM_EMAIL
+        return conn, from_email
+    return None, settings.DEFAULT_FROM_EMAIL
+
+
+def _send_email(subject, body, recipient):
+    """Send one plain-text email through the UI-configured SMTP (or the app
+    backend if not configured). Raises on failure so callers can report it."""
+    from django.core.mail import EmailMessage
+
+    conn, from_email = _email_connection_and_from()
+    EmailMessage(subject, body, from_email, [recipient], connection=conn).send(
+        fail_silently=False
+    )
+
+
 def _email_share_link(request, recipient, target, link, share_url):
     """Email a freshly created share link to the recipient. Never let a mail
     failure break link creation -- the link already exists and its URL is shown;
-    we just report whether the email went out. Actual delivery depends on the
-    configured email backend (console by default; set DJANGO_EMAIL_* for SMTP)."""
-    from django.core.mail import send_mail
-
+    we just report whether the email went out."""
     sender_name = request.user.get_username()
     label = target.name
     subject = f'{sender_name} shared "{label}" with you on DocShare'
@@ -1000,18 +1031,58 @@ def _email_share_link(request, recipient, target, link, share_url):
     if link.expires_at:
         lines.append(f"\nThe link expires on {link.expires_at:%b %d, %Y}.")
     try:
-        send_mail(
-            subject,
-            "\n".join(lines),
-            settings.DEFAULT_FROM_EMAIL,
-            [recipient],
-            fail_silently=False,
-        )
+        _send_email(subject, "\n".join(lines), recipient)
         messages.success(request, f"Link emailed to {recipient}.")
     except Exception:
         messages.warning(
             request, f"Link created, but emailing {recipient} failed."
         )
+
+
+@login_required
+def email_settings(request):
+    """Configure outgoing email (SMTP) from the UI. Staff-only -- this is an
+    app-wide setting and the app allows public signup, so a regular user must
+    not be able to read/change the mail server or send as the app."""
+    if not request.user.is_staff:
+        raise PermissionDenied
+    cfg = EmailSettings.load()
+    if request.method == "POST":
+        old_password = cfg.password
+        form = EmailSettingsForm(request.POST, instance=cfg)
+        if form.is_valid():
+            obj = form.save(commit=False)
+            if not form.cleaned_data.get("password"):
+                obj.password = old_password  # blank = keep existing
+            obj.save()
+            messages.success(request, "Email settings saved.")
+            return redirect("email_settings")
+    else:
+        form = EmailSettingsForm(instance=cfg)
+    return render(request, "files/email_settings.html", {"form": form, "cfg": cfg})
+
+
+@login_required
+def send_test_email(request):
+    if not request.user.is_staff:
+        raise PermissionDenied
+    if request.method != "POST":
+        return redirect("email_settings")
+    recipient = (request.POST.get("to") or request.user.email or "").strip()
+    if not recipient:
+        messages.error(request, "Enter a recipient address for the test.")
+        return redirect("email_settings")
+    try:
+        _send_email(
+            "DocShare test email",
+            "This is a test email from your DocShare email settings. "
+            "If you received it, sending works.",
+            recipient,
+        )
+        messages.success(request, f"Test email sent to {recipient}.")
+    except Exception as exc:  # noqa: BLE001 - surface the SMTP error to the user
+        messages.error(request, f"Test failed: {exc}")
+    return redirect("email_settings")
 
 
 @login_required

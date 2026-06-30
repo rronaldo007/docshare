@@ -20,6 +20,42 @@
             <iframe src="{% url 'share_preview' link.token doc.id %}" class="w-full h-[80vh] rounded-xl border border-slate-200"></iframe>
         {% elif doc.kind == 'text' %}
             <iframe src="{% url 'share_preview' link.token doc.id %}" class="w-full h-[70vh] rounded-xl border border-slate-200 bg-slate-50"></iframe>
+        {% elif is_zip and not zip_error %}
+            {% if zip_gallery %}
+                <p class="text-xs text-slate-400 mb-2">Image preview</p>
+                <div class="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 mb-6">
+                    {% for e in zip_gallery %}
+                    <a href="{% url 'share_zip_entry' link.token doc.id %}?path={{ e.name|urlencode }}"
+                       target="_blank" rel="noopener"
+                       class="block aspect-square overflow-hidden rounded-lg border border-slate-200 bg-slate-100">
+                        <img src="{% url 'share_zip_thumbnail' link.token doc.id %}?path={{ e.name|urlencode }}" alt="{{ e.name }}"
+                             loading="lazy" decoding="async" class="h-full w-full object-cover">
+                    </a>
+                    {% endfor %}
+                </div>
+            {% endif %}
+            {% if zip_entries %}
+                <p class="text-xs text-slate-400 mb-2">
+                    {{ zip_entries|length }} file{{ zip_entries|length|pluralize }} in this archive{% if zip_truncated %} (showing the first {{ zip_entries|length }}){% endif %}
+                </p>
+                <ul class="divide-y divide-slate-100">
+                    {% for e in zip_entries %}
+                    <li class="flex items-center justify-between gap-3 py-2">
+                        <span class="flex items-center gap-2 min-w-0">
+                            <span class="text-slate-400">{% if e.is_image %}🖼{% else %}📄{% endif %}</span>
+                            <span class="truncate text-slate-800 text-sm">{{ e.name }}</span>
+                        </span>
+                        <span class="flex items-center gap-3 text-xs shrink-0">
+                            <span class="text-slate-400">{{ e.size|filesizeformat }}</span>
+                            <a href="{% url 'share_zip_entry' link.token doc.id %}?path={{ e.name|urlencode }}"
+                               target="_blank" rel="noopener" class="text-blue-600 hover:underline">Open</a>
+                        </span>
+                    </li>
+                    {% endfor %}
+                </ul>
+            {% else %}
+                <div class="text-center py-12 text-slate-500 text-sm">This archive is empty.</div>
+            {% endif %}
         {% else %}
             <div class="text-center py-16 px-6">
                 <div class="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-full bg-slate-100 text-slate-400 text-2xl">&#9633;</div>

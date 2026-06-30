@@ -16,7 +16,7 @@ Themed navbar. The caller sets these via {% with %}:
             {% if user.is_authenticated %}
                 <a href="{% url 'browse' %}" class="px-3 py-2 rounded-full transition-colors {{ navlink }}">My files</a>
                 <a href="{% url 'my_links' %}" class="px-3 py-2 rounded-full transition-colors {{ navlink }}">Share links</a>
-                {% if user.is_staff %}
+                {% if is_admin %}
                 <a href="{% url 'email_settings' %}" class="px-3 py-2 rounded-full transition-colors {{ navlink }}">Email</a>
                 {% endif %}
                 <span class="hidden md:inline px-2 text-sm {{ navlink }}">{{ user.username }}</span>

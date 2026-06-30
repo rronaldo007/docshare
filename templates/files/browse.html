@@ -718,6 +718,17 @@
         // Single-file "Upload" form -> same uploader, so big files show progress.
         if (singleForm) {
             var singleInput = singleForm.querySelector("input[type=file]");
+            // Upload as soon as a file is chosen -- no separate button click
+            // needed (matches the "Upload folder" picker behaviour).
+            if (singleInput) {
+                singleInput.addEventListener("change", function () {
+                    if (!singleInput.files.length) return;
+                    var f = singleInput.files[0];
+                    uploadPairs([{ file: f, path: f.name }]);
+                });
+            }
+            // Keep the submit handler too, so pressing Enter / clicking Upload
+            // still works and never does a full-page (non-JS) post.
             singleForm.addEventListener("submit", function (e) {
                 if (!singleInput || !singleInput.files.length) return; // let native validation run
                 e.preventDefault();

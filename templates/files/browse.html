@@ -92,6 +92,7 @@
                         <span class="truncate text-slate-800">{{ folder.name }}</span>
                     </a>
                     <div class="flex flex-wrap items-center gap-2 text-xs sm:justify-end">
+                        <a href="{% url 'download_folder_zip' folder.id %}" class="text-slate-500 hover:underline">Download zip</a>
                         {% if folder.move_options or folder.can_move_to_root %}
                         <form method="post" action="{% url 'move_folder' folder.id %}"
                               class="flex items-center gap-1">

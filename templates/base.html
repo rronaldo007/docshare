@@ -83,6 +83,94 @@
     </footer>
 {% endif %}
 
+<!-- Global confirm/alert modal. Replaces native confirm()/alert() so dialogs
+     match the site instead of the browser's "<host> says" box. Any form with a
+     [data-confirm] attribute is intercepted and asks through this modal; scripts
+     can also call window.dsConfirm({...}) / window.dsAlert({...}) (both return a
+     Promise resolving to true/false). -->
+<div id="ds-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center px-4">
+    <div id="ds-modal-backdrop" class="absolute inset-0 bg-slate-900/50 backdrop-blur-sm"></div>
+    <div role="dialog" aria-modal="true" aria-labelledby="ds-modal-title"
+         class="relative w-full max-w-md bg-white border border-slate-200 rounded-lg shadow-xl p-6">
+        <h2 id="ds-modal-title" class="text-lg font-semibold text-slate-900">Are you sure?</h2>
+        <p id="ds-modal-message" class="mt-2 text-sm text-slate-600 break-words"></p>
+        <div class="mt-6 flex justify-end gap-3">
+            <button type="button" id="ds-modal-cancel"
+                    class="rounded-full px-4 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-100 transition-colors">Cancel</button>
+            <button type="button" id="ds-modal-ok"
+                    class="rounded-full px-5 py-2 text-sm font-semibold text-white bg-we-blue hover:bg-we-blue-dark transition-colors">Confirm</button>
+        </div>
+    </div>
+</div>
+
+<script>
+    (function () {
+        var modal = document.getElementById("ds-modal");
+        if (!modal) return;
+        var titleEl = document.getElementById("ds-modal-title");
+        var msgEl = document.getElementById("ds-modal-message");
+        var okBtn = document.getElementById("ds-modal-ok");
+        var cancelBtn = document.getElementById("ds-modal-cancel");
+        var backdrop = document.getElementById("ds-modal-backdrop");
+        var resolver = null;
+        var OK_BASE = "rounded-full px-5 py-2 text-sm font-semibold text-white transition-colors ";
+        var PRIMARY = "bg-we-blue hover:bg-we-blue-dark";
+        var DANGER = "bg-red-600 hover:bg-red-700";
+
+        function settle(result) {
+            if (!resolver) return;
+            var r = resolver;
+            resolver = null;
+            modal.classList.add("hidden");
+            document.removeEventListener("keydown", onKey);
+            r(result);
+        }
+        function onKey(e) {
+            if (e.key === "Escape") settle(false);
+            else if (e.key === "Enter") { e.preventDefault(); settle(true); }
+        }
+        function open(opts) {
+            opts = opts || {};
+            var isConfirm = opts.confirm !== false;  // alert() passes confirm:false
+            titleEl.textContent = opts.title || (isConfirm ? "Are you sure?" : "Notice");
+            msgEl.textContent = opts.message || "";
+            msgEl.classList.toggle("hidden", !opts.message);
+            cancelBtn.classList.toggle("hidden", !isConfirm);
+            okBtn.textContent = opts.confirmLabel || (isConfirm ? "Confirm" : "OK");
+            okBtn.className = OK_BASE + (opts.danger ? DANGER : PRIMARY);
+            modal.classList.remove("hidden");
+            document.addEventListener("keydown", onKey);
+            okBtn.focus();
+            return new Promise(function (resolve) { resolver = resolve; });
+        }
+
+        okBtn.addEventListener("click", function () { settle(true); });
+        cancelBtn.addEventListener("click", function () { settle(false); });
+        backdrop.addEventListener("click", function () { settle(false); });
+
+        window.dsConfirm = function (opts) { opts = opts || {}; opts.confirm = true; return open(opts); };
+        window.dsAlert = function (opts) { opts = opts || {}; opts.confirm = false; return open(opts); };
+
+        // Intercept any [data-confirm] form: ask via the modal, then submit if OK.
+        document.addEventListener("submit", function (e) {
+            var form = e.target;
+            if (!(form instanceof HTMLFormElement) || !form.hasAttribute("data-confirm")) return;
+            if (form.dataset.dsConfirmed === "1") return;  // already confirmed -> let it submit
+            e.preventDefault();
+            window.dsConfirm({
+                title: form.getAttribute("data-confirm-title") || "Are you sure?",
+                message: form.getAttribute("data-confirm"),
+                confirmLabel: form.getAttribute("data-confirm-label") || "Confirm",
+                danger: form.hasAttribute("data-confirm-danger"),
+            }).then(function (ok) {
+                if (!ok) return;
+                form.dataset.dsConfirmed = "1";
+                if (form.requestSubmit) form.requestSubmit(); else form.submit();
+            });
+        }, true);
+    })();
+</script>
+
 <script>
     // Show/hide password: any [data-pw-toggle] button toggles the input that
     // shares its `relative` wrapper, swapping the eye / eye-off icon.

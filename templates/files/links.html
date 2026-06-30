@@ -26,7 +26,8 @@
                             {% if link.requires_password %}
                                 <span class="text-slate-400">Protected</span>
                                 <form method="post" action="{% url 'remove_link_password' link.token %}"
-                                      onsubmit="return confirm('Remove the password and make this link public?');">
+                                      data-confirm="Remove the password and make this link public?"
+                                      data-confirm-title="Remove password" data-confirm-label="Remove">
                                     {% csrf_token %}
                                     <button class="text-indigo-600 hover:underline">Remove password</button>
                                 </form>
@@ -39,7 +40,8 @@
                                 <span class="text-emerald-600">Active</span>
                             {% endif %}
                             <form method="post" action="{% url 'revoke_link' link.token %}"
-                                  onsubmit="return confirm('Revoke this link?');">
+                                  data-confirm="Revoke this link? Anyone with the URL will lose access."
+                                  data-confirm-title="Revoke link" data-confirm-label="Revoke" data-confirm-danger>
                                 {% csrf_token %}
                                 <button class="text-red-500 hover:underline">Revoke</button>
                             </form>

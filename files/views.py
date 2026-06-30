@@ -68,8 +68,40 @@ def _safe_content_type(upload=None, filename=None):
     return guessed or "application/octet-stream"
 
 
+FILE_STREAM_CHUNK = 262144  # 256 KB
+
+
+def _iter_file(name, storage):
+    """Yield a stored object's bytes in chunks WITHOUT letting the backend buffer
+    the whole (possibly multi-GB) object in memory.
+
+    django-storages' S3 file downloads the ENTIRE object into a temp buffer on
+    open() -- fine for a small photo, but a multi-GB file OOM-kills a small
+    instance. So for an S3-compatible backend we read the boto3 streaming body
+    directly (sequential, constant memory); local-disk storage already streams
+    cheaply via read()."""
+    bucket = getattr(storage, "bucket", None)
+    if bucket is not None:
+        body = bucket.Object(name).get()["Body"]
+        try:
+            yield from body.iter_chunks(chunk_size=FILE_STREAM_CHUNK)
+        finally:
+            body.close()
+    else:
+        f = storage.open(name, "rb")
+        try:
+            while True:
+                chunk = f.read(FILE_STREAM_CHUNK)
+                if not chunk:
+                    break
+                yield chunk
+        finally:
+            f.close()
+
+
 def _serve_file(doc, *, inline):
-    """Serve a document's bytes safely.
+    """Serve a document's bytes safely, streaming so even a multi-GB file uses
+    constant memory.
 
     Inline serving is gated by doc.kind (so it always agrees with the preview
     template) and the Content-Type is re-derived server-side, never taken from
@@ -82,19 +114,24 @@ def _serve_file(doc, *, inline):
     the body into something more dangerous than what we declared.
     """
     kind = doc.kind
+    disposition = None
     if inline and kind == "image":
-        content_type = (doc.content_type or "").split(";")[0].strip().lower()
-        response = FileResponse(doc.file.open("rb"), content_type=content_type)
+        content_type = (doc.content_type or "").split(";")[0].strip().lower() or "application/octet-stream"
     elif inline and kind == "pdf":
-        response = FileResponse(doc.file.open("rb"), content_type="application/pdf")
+        content_type = "application/pdf"
     elif inline and kind == "text":
-        response = FileResponse(
-            doc.file.open("rb"), content_type="text/plain; charset=utf-8"
-        )
+        content_type = "text/plain; charset=utf-8"
     else:
-        response = FileResponse(
-            doc.file.open("rb"), as_attachment=True, filename=doc.name
-        )
+        content_type = "application/octet-stream"
+        disposition = f'attachment; filename="{doc.name}"'
+
+    response = StreamingHttpResponse(
+        _iter_file(doc.file.name, doc.file.storage), content_type=content_type
+    )
+    if disposition:
+        response["Content-Disposition"] = disposition
+    if doc.size:  # let the browser show download progress / total
+        response["Content-Length"] = str(doc.size)
     response["X-Content-Type-Options"] = "nosniff"
     return response
 

@@ -2,7 +2,9 @@ import os
 import shutil
 import tempfile
 import uuid
+from types import SimpleNamespace
 
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core.files.base import ContentFile
 from django.core.files.storage import Storage
@@ -40,6 +42,64 @@ class RemoteLikeStorage(Storage):
 
     def path(self, name):
         raise NotImplementedError("This backend doesn't support absolute paths.")
+
+    # The multipart_* views reach the S3 client via default_storage.connection
+    # and default_storage.bucket_name, exactly like the real S3Storage backend.
+    bucket_name = "test-bucket"
+
+    @property
+    def connection(self):
+        return SimpleNamespace(meta=SimpleNamespace(client=_MULTIPART_CLIENT))
+
+
+class _FakeMultipartClient:
+    """In-memory stand-in for the boto3 S3 client's multipart calls, backed by
+    RemoteLikeStorage._files. Lets the multipart_* views run without a network or
+    a real bucket: create opens a session, the test injects part bytes (the
+    browser PUT can't reach a fake presigned URL), and complete concatenates the
+    parts into _files so default_storage.size sees the finished object."""
+
+    def __init__(self):
+        self.uploads = {}  # upload_id -> {"key": str, "parts": {n: bytes}}
+
+    def reset(self):
+        self.uploads = {}
+
+    def create_multipart_upload(self, Bucket, Key):
+        upload_id = uuid.uuid4().hex
+        self.uploads[upload_id] = {"key": Key, "parts": {}}
+        return {"UploadId": upload_id}
+
+    def generate_presigned_url(self, operation, Params, ExpiresIn):
+        return (
+            "https://fake.example/%s?uploadId=%s&partNumber=%s"
+            % (Params["Key"], Params["UploadId"], Params["PartNumber"])
+        )
+
+    def put_part(self, upload_id, part_number, data):
+        # Test helper: simulate the browser PUTting one part to the bucket.
+        self.uploads[upload_id]["parts"][part_number] = data
+
+    def list_parts(self, Bucket, Key, UploadId, **kwargs):
+        parts = self.uploads.get(UploadId, {}).get("parts", {})
+        return {
+            "Parts": [
+                {"PartNumber": n, "ETag": '"etag-%d"' % n} for n in sorted(parts)
+            ],
+            "IsTruncated": False,
+        }
+
+    def complete_multipart_upload(self, Bucket, Key, UploadId, MultipartUpload):
+        up = self.uploads.pop(UploadId)
+        parts = up["parts"]
+        RemoteLikeStorage._files[Key] = b"".join(parts[n] for n in sorted(parts))
+        return {"ETag": '"final"'}
+
+    def abort_multipart_upload(self, Bucket, Key, UploadId):
+        self.uploads.pop(UploadId, None)
+
+
+_MULTIPART_CLIENT = _FakeMultipartClient()
 
 
 class ShareLinkIsolationTests(TestCase):
@@ -869,3 +929,150 @@ class ShareZipPreviewTests(TestCase):
         # The link targets the zip doc; another doc id must not be reachable.
         url = reverse("share_zip_entry", args=[self.link.token, self.other_doc.id]) + "?path=n.txt"
         self.assertEqual(self.client.get(url).status_code, 404)
+
+
+@override_settings(
+    STORAGES={
+        "default": {"BACKEND": "files.tests.RemoteLikeStorage"},
+        "staticfiles": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
+    },
+    DIRECT_UPLOAD_ENABLED=True,
+)
+class MultipartUploadTests(TestCase):
+    """The multipart direct-upload endpoints let the browser PUT a >5 GB file to
+    the bucket in parts. Like commit_upload they fail closed: keys are minted
+    server-side under the user's prefix, the part list and size come from the
+    bucket, and every endpoint 404s when direct upload is off."""
+
+    def setUp(self):
+        RemoteLikeStorage._files = {}
+        _MULTIPART_CLIENT.reset()
+        User = get_user_model()
+        self.user = User.objects.create_user(username="owner", password="pw")
+        self.other = User.objects.create_user(username="intruder", password="pw")
+        self.client.force_login(self.user)
+
+    def _post(self, name, *args, **fields):
+        return self.client.post(
+            reverse(name, args=args), fields, HTTP_X_REQUESTED_WITH="XMLHttpRequest"
+        )
+
+    def test_create_mints_namespaced_key_and_session(self):
+        resp = self._post("multipart_create_root", filename="big.zip")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertTrue(data["key"].startswith(f"user_{self.user.id}/"))
+        self.assertTrue(data["key"].endswith("big.zip"))
+        self.assertEqual(data["key"].count("/"), 2)
+        self.assertTrue(data["upload_id"])
+        self.assertEqual(data["part_size"], settings.DIRECT_UPLOAD_PART_BYTES)
+
+    def test_create_scopes_target_folder_to_owner(self):
+        theirs = Folder.objects.create(name="theirs", owner=self.other)
+        resp = self._post("multipart_create", theirs.id, filename="big.zip")
+        self.assertEqual(resp.status_code, 404)
+
+    def test_full_flow_records_document_with_size_from_bucket(self):
+        create = self._post("multipart_create_root", filename="big.zip").json()
+        key, upload_id = create["key"], create["upload_id"]
+
+        sign = self._post(
+            "multipart_sign_part_root", key=key, upload_id=upload_id, part_number=1
+        )
+        self.assertEqual(sign.status_code, 200)
+        self.assertIn("url", sign.json())
+
+        # Simulate the browser having PUT two parts straight to the bucket. The
+        # client also sends a bogus size; the recorded size must come from the
+        # bucket, and the subfolder tree is rebuilt from the path.
+        _MULTIPART_CLIENT.put_part(upload_id, 1, b"hello ")
+        _MULTIPART_CLIENT.put_part(upload_id, 2, b"bucket")
+        resp = self._post(
+            "multipart_complete_root",
+            key=key,
+            upload_id=upload_id,
+            path="Videos/big.zip",
+            size="999999",
+        )
+        self.assertEqual(resp.status_code, 200)
+
+        doc = Document.objects.get()
+        self.assertEqual(doc.size, len(b"hello bucket"))
+        self.assertEqual(doc.name, "big.zip")
+        self.assertEqual(doc.folder.name, "Videos")
+        self.assertEqual(doc.file.name, key)
+
+    def test_complete_rejects_key_outside_user_prefix(self):
+        evil = f"user_{self.user.id + 999}/{uuid.uuid4().hex}/secret"
+        resp = self._post(
+            "multipart_complete_root", key=evil, upload_id="x", path="secret"
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(Document.objects.count(), 0)
+
+    def test_complete_rejects_malformed_key_shape(self):
+        bad = f"user_{self.user.id}/a/b/c"
+        resp = self._post("multipart_complete_root", key=bad, upload_id="x", path="c")
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(Document.objects.count(), 0)
+
+    def test_complete_fails_closed_when_no_parts_uploaded(self):
+        create = self._post("multipart_create_root", filename="big.zip").json()
+        resp = self._post(
+            "multipart_complete_root",
+            key=create["key"],
+            upload_id=create["upload_id"],
+            path="big.zip",
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(Document.objects.count(), 0)
+
+    def test_sign_rejects_key_outside_user_prefix(self):
+        evil = f"user_{self.user.id + 999}/{uuid.uuid4().hex}/secret"
+        resp = self._post(
+            "multipart_sign_part_root", key=evil, upload_id="x", part_number=1
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_sign_rejects_bad_part_number(self):
+        create = self._post("multipart_create_root", filename="big.zip").json()
+        for bad in (0, 10001, "nope"):
+            resp = self._post(
+                "multipart_sign_part_root",
+                key=create["key"],
+                upload_id=create["upload_id"],
+                part_number=bad,
+            )
+            self.assertEqual(resp.status_code, 400)
+
+    def test_abort_validates_key(self):
+        evil = f"user_{self.user.id + 999}/{uuid.uuid4().hex}/secret"
+        resp = self._post("multipart_abort_root", key=evil, upload_id="x")
+        self.assertEqual(resp.status_code, 400)
+
+    def test_endpoints_require_login(self):
+        self.client.logout()
+        for name in (
+            "multipart_create_root",
+            "multipart_sign_part_root",
+            "multipart_complete_root",
+            "multipart_abort_root",
+        ):
+            resp = self._post(
+                name, filename="x", key="k", upload_id="u", part_number=1, path="x"
+            )
+            self.assertEqual(resp.status_code, 302)
+            self.assertIn("/accounts/login/", resp["Location"])
+
+    def test_endpoints_404_when_disabled(self):
+        with override_settings(DIRECT_UPLOAD_ENABLED=False):
+            for name in (
+                "multipart_create_root",
+                "multipart_sign_part_root",
+                "multipart_complete_root",
+                "multipart_abort_root",
+            ):
+                resp = self._post(
+                    name, filename="x", key="k", upload_id="u", part_number=1, path="x"
+                )
+                self.assertEqual(resp.status_code, 404)

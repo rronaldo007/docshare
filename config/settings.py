@@ -143,9 +143,17 @@ DIRECT_UPLOAD_ENABLED = bool(_S3_BUCKET) and _env_bool("DJANGO_DIRECT_UPLOAD", F
 # How long a presigned PUT URL stays valid (seconds). Short by design: the URL
 # is a bearer capability to write one object key for its lifetime.
 DIRECT_UPLOAD_EXPIRY = int(os.environ.get("DJANGO_DIRECT_UPLOAD_EXPIRY", 3600))
-# A single presigned PUT tops out at S3's 5 GB object limit; larger files fall
-# back to the chunked uploader client-side.
+# A single presigned PUT tops out at S3's 5 GB object limit; this is the size at
+# which the client switches from a one-shot PUT to a multipart upload (below).
 DIRECT_UPLOAD_MAX_BYTES = 5 * 1024 * 1024 * 1024
+# Multipart direct upload: files over the single-PUT ceiling are uploaded to the
+# bucket in parts, each via its own short-lived presigned PUT, lifting the limit
+# to S3's 5 TB / 10,000-part maximum. S3/R2 require every part except the last to
+# be at least 5 MB, so the part size must stay well above that; 256 MB covers
+# files up to ~2.5 TB before hitting the 10,000-part cap. Env-tunable.
+DIRECT_UPLOAD_PART_BYTES = int(
+    os.environ.get("DJANGO_DIRECT_UPLOAD_PART_BYTES", 256 * 1024 * 1024)
+)
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 

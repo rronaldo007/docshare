@@ -27,6 +27,16 @@ urlpatterns = [
         files_views.share_preview,
         name="share_preview",
     ),
+    path(
+        "s/<uuid:token>/doc/<int:doc_id>/zip-entry/",
+        files_views.share_zip_entry,
+        name="share_zip_entry",
+    ),
+    path(
+        "s/<uuid:token>/doc/<int:doc_id>/zip-thumb/",
+        files_views.share_zip_thumbnail,
+        name="share_zip_thumbnail",
+    ),
     path("", include("pages.urls")),
     path("files/", include("files.urls")),
 ]

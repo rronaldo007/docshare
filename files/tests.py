@@ -809,3 +809,63 @@ class EmailSettingsUITests(TestCase):
     def test_test_email_non_staff_forbidden(self):
         self.client.login(username="plain", password="pw")
         self.assertEqual(self.client.post(reverse("send_test_email"), {"to": "x@y.com"}).status_code, 403)
+
+
+from files.permissions import is_admin
+
+
+class IsAdminTests(TestCase):
+    def test_first_real_user_is_admin_without_staff(self):
+        User = get_user_model()
+        owner = User.objects.create_user(username="owner", password="pw")  # first
+        later = User.objects.create_user(username="later", password="pw")  # signup
+        self.assertTrue(is_admin(owner))
+        self.assertFalse(is_admin(later))
+
+    def test_staff_is_admin(self):
+        User = get_user_model()
+        User.objects.create_user(username="owner", password="pw")
+        staffer = User.objects.create_user(username="s", password="pw", is_staff=True)
+        self.assertTrue(is_admin(staffer))
+
+
+class ShareZipPreviewTests(TestCase):
+    """A shared zip exposes its own contents (gallery + entries) but nothing else."""
+
+    def setUp(self):
+        User = get_user_model()
+        self.owner = User.objects.create_user(username="owner", password="pw")
+        body = _zip_bytes({"a.jpg": _jpeg_bytes("red"), "n.txt": b"hi"})
+        self.zip_doc = Document.objects.create(
+            name="b.zip",
+            file=SimpleUploadedFile("b.zip", body, content_type="application/zip"),
+            content_type="application/zip", size=len(body), owner=self.owner,
+        )
+        self.other_doc = Document.objects.create(
+            name="secret.txt", file=SimpleUploadedFile("secret.txt", b"x"), owner=self.owner,
+        )
+        self.link = ShareLink.objects.create(document=self.zip_doc, created_by=self.owner)
+
+    def test_share_view_lists_zip_contents(self):
+        resp = self.client.get(reverse("share_view", args=[self.link.token]))
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.context["is_zip"])
+        names = {e["name"] for e in resp.context["zip_entries"]}
+        self.assertEqual(names, {"a.jpg", "n.txt"})
+
+    def test_share_zip_entry_streams(self):
+        url = reverse("share_zip_entry", args=[self.link.token, self.zip_doc.id]) + "?path=n.txt"
+        resp = self.client.get(url)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(b"".join(resp.streaming_content), b"hi")
+
+    def test_share_zip_thumbnail(self):
+        url = reverse("share_zip_thumbnail", args=[self.link.token, self.zip_doc.id]) + "?path=a.jpg"
+        resp = self.client.get(url)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp["Content-Type"], "image/jpeg")
+
+    def test_cannot_reach_other_doc_through_link(self):
+        # The link targets the zip doc; another doc id must not be reachable.
+        url = reverse("share_zip_entry", args=[self.link.token, self.other_doc.id]) + "?path=n.txt"
+        self.assertEqual(self.client.get(url).status_code, 404)

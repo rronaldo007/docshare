@@ -33,6 +33,7 @@ from django.core.exceptions import PermissionDenied
 
 from .forms import DocumentForm, EmailSettingsForm, FolderForm, ShareForm
 from .models import Document, EmailSettings, Folder, ShareLink
+from .permissions import is_admin
 
 
 # Content types we are willing to serve INLINE (rendered in the browser at our
@@ -790,20 +791,15 @@ def preview_document(request, doc_id):
     return render(request, "files/preview.html", ctx)
 
 
-@login_required
-def zip_entry(request, doc_id):
-    """Stream one file from inside a zip document. Owner-scoped; zipfile only
-    reads entries that exist in the archive (a path not in the zip raises and
-    404s -- no client path is trusted). Served with the same inline allowlist as
-    other files -- images/PDF/plain text render inline, everything else (incl.
-    HTML/SVG) is forced to download -- so an entry can never execute as
-    same-origin script. Reads only the requested entry from R2 (range requests),
-    never the whole archive."""
-    doc = get_object_or_404(Document, pk=doc_id, owner=request.user)
-    if not _is_zip(doc):
-        raise Http404
-    entry = request.GET.get("path", "")
-    if not entry or entry.endswith("/"):
+def _zip_entry_response(doc, entry):
+    """Build a streaming response for one entry inside a zip doc, or raise Http404.
+    zipfile only reads entries that actually exist in the archive (a path not in
+    the zip raises -> no client path is trusted), and the same inline allowlist as
+    other files applies -- images/PDF/plain text inline, everything else (incl.
+    HTML/SVG) forced to download -- so an entry can never execute as same-origin
+    script. Reads only the requested entry from R2 (range requests), never the
+    whole archive. Callers do their own auth (owner-scope or share-link guards)."""
+    if not _is_zip(doc) or not entry or entry.endswith("/"):
         raise Http404
     try:
         zf, fp = _open_zip(doc)
@@ -836,6 +832,13 @@ def zip_entry(request, doc_id):
         response["Content-Disposition"] = f'attachment; filename="{filename}"'
     response["X-Content-Type-Options"] = "nosniff"
     return response
+
+
+@login_required
+def zip_entry(request, doc_id):
+    """Owner: stream one file from inside one of the user's own zip documents."""
+    doc = get_object_or_404(Document, pk=doc_id, owner=request.user)
+    return _zip_entry_response(doc, request.GET.get("path", ""))
 
 
 def _zip_thumb_key(doc, entry):
@@ -872,17 +875,10 @@ def _generate_zip_thumbnail(doc, entry, key):
     default_storage.save(key, File(buf))
 
 
-@login_required
-def zip_thumbnail(request, doc_id):
-    """Serve a cached thumbnail for one image inside a zip (gallery preview).
-    Owner-scoped; only image entries, and zipfile only reads entries that exist
-    (a bad path raises -> 404). Reads only that entry from R2, never the whole
-    archive."""
-    doc = get_object_or_404(Document, pk=doc_id, owner=request.user)
-    if not _is_zip(doc):
-        raise Http404
-    entry = request.GET.get("path", "")
-    if not entry or not _is_zip_image(entry):
+def _zip_thumbnail_response(doc, entry):
+    """Serve a cached JPEG thumbnail for one image inside a zip, or raise Http404.
+    Only image entries; zipfile only reads entries that exist. Callers do auth."""
+    if not _is_zip(doc) or not entry or not _is_zip_image(entry):
         raise Http404
     key = _zip_thumb_key(doc, entry)
     try:
@@ -894,6 +890,13 @@ def zip_thumbnail(request, doc_id):
     response["X-Content-Type-Options"] = "nosniff"
     response["Cache-Control"] = "private, max-age=86400"
     return response
+
+
+@login_required
+def zip_thumbnail(request, doc_id):
+    """Owner: cached thumbnail for one image inside one of the user's zips."""
+    doc = get_object_or_404(Document, pk=doc_id, owner=request.user)
+    return _zip_thumbnail_response(doc, request.GET.get("path", ""))
 
 
 @login_required
@@ -1041,10 +1044,10 @@ def _email_share_link(request, recipient, target, link, share_url):
 
 @login_required
 def email_settings(request):
-    """Configure outgoing email (SMTP) from the UI. Staff-only -- this is an
+    """Configure outgoing email (SMTP) from the UI. Admin-only -- this is an
     app-wide setting and the app allows public signup, so a regular user must
     not be able to read/change the mail server or send as the app."""
-    if not request.user.is_staff:
+    if not is_admin(request.user):
         raise PermissionDenied
     cfg = EmailSettings.load()
     if request.method == "POST":
@@ -1064,7 +1067,7 @@ def email_settings(request):
 
 @login_required
 def send_test_email(request):
-    if not request.user.is_staff:
+    if not is_admin(request.user):
         raise PermissionDenied
     if request.method != "POST":
         return redirect("email_settings")
@@ -1336,11 +1339,18 @@ def share_view(request, token):
         return render(request, "files/share_password.html", {"link": link})
 
     if link.document:
-        return render(
-            request,
-            "files/share_document.html",
-            {"link": link, "doc": link.document},
-        )
+        doc = link.document
+        ctx = {"link": link, "doc": doc}
+        if _is_zip(doc):
+            ctx["is_zip"] = True
+            try:
+                entries, images, truncated = _zip_listing(doc)
+                ctx["zip_entries"] = entries
+                ctx["zip_gallery"] = images
+                ctx["zip_truncated"] = truncated
+            except Exception:
+                ctx["zip_error"] = True
+        return render(request, "files/share_document.html", ctx)
 
     folder = link.folder
     subfolders = folder.children.all()
@@ -1392,6 +1402,26 @@ def share_preview(request, token, doc_id):
         return redirect("share_view", token=token)
     doc = _shared_doc_or_404(link, doc_id)
     return _serve_file(doc, inline=True)
+
+
+def share_zip_entry(request, token, doc_id):
+    """Public: stream one entry from inside a shared zip. Same share-link guards
+    as share_download (valid + unlocked + the doc must be the link's target), so
+    it never exposes anything beyond the shared zip itself."""
+    link = _valid_link(token)
+    if not _is_unlocked(request, link):
+        return redirect("share_view", token=token)
+    doc = _shared_doc_or_404(link, doc_id)
+    return _zip_entry_response(doc, request.GET.get("path", ""))
+
+
+def share_zip_thumbnail(request, token, doc_id):
+    """Public: cached thumbnail for one image inside a shared zip (gallery)."""
+    link = _valid_link(token)
+    if not _is_unlocked(request, link):
+        return redirect("share_view", token=token)
+    doc = _shared_doc_or_404(link, doc_id)
+    return _zip_thumbnail_response(doc, request.GET.get("path", ""))
 
 
 def _is_descendant(doc, root_folder):
